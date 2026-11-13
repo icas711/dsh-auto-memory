@@ -12,14 +12,30 @@
 
 import type { MemoryRecord } from './types.ts'
 
-/** 分词:拉丁词 + CJK 字符二元组(bigram,检索标准做法)。 */
+/** 俄语高频功能词(长度 >=3 的需要显式列出;<=2 的在分词时统一丢弃)。 */
+const RU_STOPWORDS = new Set([
+  'это', 'как', 'что', 'для', 'при', 'или', 'его', 'еще', 'все', 'они', 'так', 'уже', 'нет',
+  'там', 'тут', 'чем', 'где', 'без', 'над', 'под', 'про', 'был', 'была', 'были', 'быть', 'есть',
+  'мне', 'нам', 'вам', 'ему', 'них', 'нас', 'вас', 'тоже', 'очень', 'когда', 'если', 'чтобы',
+  'также', 'можно', 'нужно', 'надо', 'будет', 'этот', 'эта', 'эти', 'того', 'тоже', 'только',
+])
+
+/** 俄语词干近似:截前 5 个字母(закупки/закупка/закупок → закуп;经典轻量词干法,无词典)。 */
+function stemRu(token: string): string {
+  return token.length > 5 ? token.slice(0, 5) : token
+}
+
+/** 分词:拉丁词 + 西里尔词(轻词干,去停用词)+ CJK 字符二元组(bigram,检索标准做法)。 */
 export function words(text: string): Set<string> {
-  const tokens = text.toLowerCase().split(/[^a-z0-9一-鿿]+/).filter(w => w.length > 0)
+  const tokens = text.toLowerCase().replaceAll('ё', 'е').split(/[^a-z0-9а-я一-鿿]+/).filter(w => w.length > 0)
   const out = new Set<string>()
   for (const token of tokens) {
     if (/^[一-鿿]+$/.test(token)) {
       if (token.length === 1) out.add(token)
       else for (let i = 0; i + 1 < token.length; i++) out.add(token.slice(i, i + 2))
+    } else if (/^[а-я]+$/.test(token)) {
+      if (token.length <= 2 || RU_STOPWORDS.has(token)) continue
+      out.add(stemRu(token))
     } else {
       out.add(token)
     }
@@ -130,7 +146,12 @@ export interface ContradictionSignal {
   evidence: string
 }
 
-/** 日期提取:ISO 与常见简写(YYYY/MM、YYYY年M月),返回归一化 YYYY-MM。 */
+const RU_MONTHS: Readonly<Record<string, string>> = {
+  января: '01', февраля: '02', марта: '03', апреля: '04', мая: '05', июня: '06',
+  июля: '07', августа: '08', сентября: '09', октября: '10', ноября: '11', декабря: '12',
+}
+
+/** 日期提取:ISO、YYYY/MM、YYYY年M月、DD.MM.YYYY、«15 октября 2026»,返回归一化 YYYY-MM[-DD]。 */
 function extractDates(text: string): string[] {
   const out: string[] = []
   for (const match of text.matchAll(/\b(\d{4})[-/年](\d{1,2})(?:[-/月](\d{1,2}))?/g)) {
@@ -138,13 +159,20 @@ function extractDates(text: string): string[] {
     const month = String(match[2]).padStart(2, '0')
     out.push(match[3] !== undefined ? `${year}-${month}-${String(match[3]).padStart(2, '0')}` : `${year}-${month}`)
   }
+  for (const match of text.matchAll(/(?<!\d)(\d{1,2})\.(\d{1,2})\.(\d{4})(?!\d)/g)) {
+    out.push(`${match[3]!}-${String(match[2]).padStart(2, '0')}-${String(match[1]).padStart(2, '0')}`)
+  }
+  for (const match of text.matchAll(/(?<!\d)(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+(\d{4})/gi)) {
+    out.push(`${match[3]!}-${RU_MONTHS[match[2]!.toLowerCase()]!}-${String(match[1]).padStart(2, '0')}`)
+  }
   return out
 }
 
 /** 数值提取:带单位上下文的数字(同单位不同值才算矛盾)。
  * 1.6.0 补常见中文计量单位(元/岁/人/条/万)——CJK 场景矛盾检测的主战场。 */
 function extractNumbers(text: string): Array<{ value: string; unit: string }> {
-  return [...text.matchAll(/(\d+(?:\.\d+)?)\s*(%|GB|KB|MB|天|次|个|小时|分钟|秒|元|岁|人|条|万|[vV]\d+)/g)]
+  // 俄语单位按前缀归一(дн→дня/дней、час→часов、мин→минут):同单位不同值才算矛盾
+  return [...text.matchAll(/(\d+(?:[.,]\d+)?)\s*(%|GB|KB|MB|天|次|个|小时|分钟|秒|元|岁|人|条|万|[vV]\d+|руб|₽|лет|год|дн|шт|чел|тыс|млн|час|мин|сек)/gi)]
     .map(match => ({ value: match[1]!, unit: match[2]!.toLowerCase() }))
 }
 

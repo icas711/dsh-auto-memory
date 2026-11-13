@@ -172,6 +172,10 @@ const GREETING_PATTERNS: RegExp[] = [
   /^(?:你好|您好|hi|hello|hey|早上好|晚上好|下午好)/i,
   /(?:谢谢|感谢|thanks|thank you|多谢|再见|晚安|回头见|bye)/i,
   /^(?:好的|嗯+|哦+|ok|okay|got it|明白|收到)[。.!!~s]*$/i,
+  // 俄语(\b 对西里尔无效,边界手写)
+  /^(?:привет|здравствуй(?:те)?|добрый (?:день|вечер)|доброе утро|хай)/i,
+  /(?:спасибо|благодарю|до свидания|до встречи|спокойной ночи|(?:^|[\s,.!])пока(?:$|[\s,.!]))/i,
+  /^(?:ок|окей|ладно|хорошо|понял[аи]?|принято|ясно|угу|ага)[\s.!~]*$/i,
 ]
 
 /** 纯函数:候选正文是否命中闲聊抑制(强问候 AND 剥问候后无实质内容)。 */
@@ -182,10 +186,15 @@ export function isChitchat(text: string): boolean {
     .replace(/^(?:你好|您好|hi|hello|hey|早上好|晚上好|下午好)[,，!！。~s]*/i, '')
     .replace(/(?:谢谢|感谢|多谢|辛苦了|再见|晚安|回头见)(啦|了|呢)?[。.!!~s]*$/g, '')
     .replace(/(?:thanks|thank[s!]you|bye|hello|hi|got it|ok)[!.~s]*/gi, '')
+    .replace(/^(?:привет|здравствуй(?:те)?|добрый день|добрый вечер|доброе утро)[,!.\s]*/i, '')
+    .replace(/(?:спасибо|благодарю|до свидания|до встречи|спокойной ночи)[,!.\s]*$/i, '')
     .trim()
   if (/[a-z][a-z0-9-]{2,}/i.test(stripped)) return false
   const cjkCount = (stripped.match(/[一-鿿]/g) ?? []).length
   if (cjkCount >= 6) return false
+  // 西里尔:剥掉问候后仍有 >=12 个字母即有实质内容(与 CJK 的长度门槛同思路,宁漏勿误)
+  const cyrCount = (stripped.match(/[а-яё]/gi) ?? []).length
+  if (cyrCount >= 12) return false
   return true
 }
 

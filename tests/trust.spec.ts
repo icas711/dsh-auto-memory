@@ -78,7 +78,7 @@ describe('status/evidence 落盘往返', () => {
     const rec = await store.read('inj', 'user')
     expect(rec?.status).toBe('disputed')
     // 不进注入
-    expect(renderMemoryIndexDetail(store, config, '/w').text).not.toContain('inj')
+    expect(renderMemoryIndexDetail(store, config, '/w').text).not.toContain('(inj.md)')
   })
 })
 

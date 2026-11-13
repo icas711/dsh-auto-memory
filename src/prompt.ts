@@ -86,7 +86,13 @@ export function renderMemoryIndexDetail(store: MemoryStore, config: Config, cwd:
   }
   const projectIndex = store.readIndexSync('project', cwd)
   if (projectIndex !== null) sections.push(`## Project memories\n\n${projectIndex}`)
-  if (sections.length === 0) return { text: '', injected: [], truncated: [], textBytes: 0 }
+  if (sections.length === 0) {
+    // Пустое хранилище: инструкция «когда писать» всё равно показывается (иначе
+    // замкнутый круг — без записей модель не знает, что память вообще надо вести).
+    // Секция статична (индекса нет), поэтому KV-префикс не страдает.
+    const empty = neutralizeBraces(`${CONTEXT_OPEN}\n${CONTEXT_NOTE}\n# Persistent memory index\n\n(no memories saved yet)\n\n${MEMORY_POLICY_TEXT}\n${CONTEXT_CLOSE}`)
+    return { text: empty, injected: [], truncated: [], textBytes: Buffer.byteLength(empty, 'utf8') }
+  }
   const index = `# Persistent memory index\n\n${sections.join('\n\n')}`
   // 全量名单(截断前)——审计的 truncated = 全量 - 保留
   const allNames = namesFromIndexLines(index.split('\n'))
@@ -161,7 +167,12 @@ export function renderMemoryIndexDetail(store: MemoryStore, config: Config, cwd:
 }
 
 /** 写入指导(随索引段注入):何时写、怎么写、何时不写(对齐 Claude Code 的记忆规则)。 */
-export const MEMORY_POLICY_TEXT = `When to write a memory (memory_write):
+export const MEMORY_POLICY_TEXT = `You have persistent memory across sessions. Save memories proactively, as soon as
+you learn something durable — do not wait for the user to say "remember". Do it in
+the same turn, with a memory_write call, without announcing it at length. Relevant
+memories may also be attached to a user message inside <memory_recall> blocks.
+
+When to write a memory (memory_write):
 - The user states who they are: role, expertise, or durable preferences (type: user).
 - The user corrects or confirms how you should work (type: feedback; include
   **Why:** and **How to apply:** lines in the body).

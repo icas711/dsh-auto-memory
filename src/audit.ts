@@ -293,6 +293,11 @@ export function registerInjectionAudit(
         detail = renderMemoryIndexDetail(store, config, cwd, query)
       }
     }
+    // Пустая инъекция (только инструкция, записей нет) — не событие аудита
+    if (detail.injected.length === 0 && detail.truncated.length === 0) {
+      lastSignature.delete(sessionId)
+      return detail.text
+    }
     const signature = `${cwd}\0${detail.injected.join(',')}\0|${detail.truncated.join(',')}`
     if (lastSignature.get(sessionId) === signature) return detail.text
     lastSignature.set(sessionId, signature)

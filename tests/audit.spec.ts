@@ -99,10 +99,16 @@ describe('registerInjectionAudit(按会话签名去重)', () => {
     await audit.flush()
     expect((await readAudit(base)).length).toBe(4)
   })
-  it('无记忆(cwd 无索引)返回空文本且不写审计', async () => {
+  it('无记忆(cwd 无索引):注入仅含写入指导(不再是空串),且不写审计', async () => {
     const audit = registerInjectionAudit(store, config, base)
-    expect(audit.text('/nowhere', 's1')).toBe('')
+    const text = audit.text('/nowhere', 's1')
+    expect(text).toContain('(no memories saved yet)')
+    expect(text).toContain('memory_write')
     expect(await readAudit(base)).toEqual([])
+  })
+  it('无 cwd(裸组装)仍返回空串', () => {
+    const audit = registerInjectionAudit(store, config, base)
+    expect(audit.text(undefined, 's1')).toBe('')
   })
   it('词集懒冻结(1.6.0):未截断不取词集;首次截断才取并冻结;冻结后不再取', async () => {
     // 一条小记忆:预算内,组装不发生截断 → getQueryText 不被调用

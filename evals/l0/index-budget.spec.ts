@@ -61,10 +61,17 @@ describe('index-budget', () => {
     expect(files).toHaveLength(40)
   })
 
-  it('空库零注入:无记忆时输出为空串(零 token 占用的硬保证)', async () => {
+  it('空库只注入写入指导(1.7.0:不再零注入,否则模型从零开始永远不写记忆)', async () => {
     const store = new MemoryStore(join(root, 'empty'))
     const injected = renderMemoryIndexText(store, { maxBytes: 4096, enableUserScope: true } as never, CWD)
+    expect(injected).toContain('(no memories saved yet)')
+    expect(injected).toContain('memory_write')
+    // 仍守预算:指导 + 协议壳 <= maxBytes
+    expect(bytes(injected)).toBeLessThanOrEqual(4096)
+  })
+  it('无 cwd 时无任何注入(裸组装)', () => {
+    const store = new MemoryStore(join(root, 'empty2'))
+    const injected = renderMemoryIndexText(store, { maxBytes: 4096, enableUserScope: true } as never, undefined)
     expect(injected).toBe('')
-    expect(bytes(injected)).toBe(0)
   })
 })

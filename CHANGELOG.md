@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 the [GitHub Releases](https://github.com/AskTheWay/dsh-auto-memory/releases)
 page (generated from this file at publish time).
 
+## [1.9.0] - 2026-11-14
+
+Background cleanup: duplicate memories are merged automatically.
+
+### Added
+- `src/curate.ts`: lexical duplicate clusters → LLM confirmation and merged text →
+  survivor rewritten, the rest marked `superseded` (reversible). Runs after the first
+  finished turn of a session, at most once per `curateIntervalHours` per layer.
+- Config: `curate`, `curateIntervalHours`, `curateMaxMerges`.
+
 ## [1.8.0] - 2026-11-14
 
 Multi-user memory: personal layers per login plus a moderated team-wide layer.

@@ -21,6 +21,7 @@ import { registerInjectionAudit } from './audit.ts'
 import { registerConsolidation } from './consolidate.ts'
 import { registerRecall } from './recall.ts'
 import { ownerOf } from './owner.ts'
+import { registerCuration } from './curate.ts'
 import { registerMemoryApi } from './memory-api.ts'
 import { loadSettings, applySettings, SETTABLE_FIELDS } from './settings.ts'
 
@@ -62,6 +63,12 @@ export interface Config {
   admins: string[]
   /** 1.8.0:是否启用全员共享层(_shared;非管理员写入需审核)。 */
   enableSharedScope: boolean
+  /** 1.9.0:фоновая уборка — слияние дублей (LLM подтверждает; старые помечаются superseded). */
+  curate?: boolean
+  /** Не чаще раза в N часов на слой. */
+  curateIntervalHours?: number
+  /** Максимум слияний за один проход. */
+  curateMaxMerges?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -82,6 +89,9 @@ export const Config: z<Config> = z.object({
   recallModel: z.string(),
   admins: z.array(z.string()).default([]),
   enableSharedScope: z.boolean().default(true),
+  curate: z.boolean().default(true),
+  curateIntervalHours: z.number().default(24),
+  curateMaxMerges: z.number().default(3),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -151,6 +161,7 @@ export function apply(ctx: Context, config: Config): void {
   // 后注入预算立即生效(此前传 config 导致设置永不作用于注入路径,重启也不恢复)
   // 1.7.0:按需召回(agent/pre-step 尾部追加,不动系统提示词 → KV 前缀稳定)
   const recall = registerRecall(ctx, store, live)
+  const curation = registerCuration(ctx, store, live)
 
   const audit = registerInjectionAudit(store, live, rootDir, consolidation.getQueryText)
   ctx.systemPrompt.section({
@@ -162,5 +173,6 @@ export function apply(ctx: Context, config: Config): void {
     audit.cleanup(session.id)
     consolidation.cleanup(session.id)
     recall.cleanup(session.id)
+    curation.cleanup(session.id)
   })
 }

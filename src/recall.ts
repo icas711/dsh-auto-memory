@@ -291,7 +291,7 @@ export function createRecaller(baseStore: MemoryStore, options: RecallOptions, s
 // ---------- LLM 选择器 ----------
 
 /** 用 ctx.llm 流式调用拿到纯文本;不可用/失败/截断返回 null。 */
-export function createLlmSelector(ctx: Context, options: RecallOptions): RecallSelector {
+export function createLlmSelector(ctx: Context, options: RecallOptions, maxTokens = 256): RecallSelector {
   return async (prompt, agent, signal) => {
     const llm = ctx.get('llm')
     if (llm === undefined) return null
@@ -308,7 +308,7 @@ export function createLlmSelector(ctx: Context, options: RecallOptions): RecallS
         content: [{ type: 'text', text: prompt }],
         source: { kind: 'dsh-auto-memory' },
       })],
-      maxTokens: 256,
+      maxTokens,
       sessionId: agent.session.id,
       signal,
     }

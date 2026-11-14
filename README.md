@@ -300,9 +300,31 @@ and where the defaults the runtime layer falls back to come from:
     recallProvider: ''           # selector provider/model, set both to use a cheaper model;
     recallModel: ''              # empty = the session's own model
     staleAfterDays: 0            # >0: soft-hide zero-read memories older than N days (files kept)
+    curate: true                 # background cleanup: merge duplicate memories (see "Background cleanup")
+    curateIntervalHours: 24      # at most once per N hours per layer
+    curateMaxMerges: 3           # merges per pass
     enableSharedScope: true      # team-wide shared layer (see "Multi-user")
     admins: [boss@dkp]           # session.header.owner values allowed to review the shared layer
 ```
+
+## Background cleanup (1.9.0)
+
+After the first finished turn of a session (never blocking it) the plugin looks for
+duplicate memories inside each of the employee's personal layers and merges them:
+
+1. **Candidates** — a cheap lexical pass (shared words, similar descriptions, kebab names
+   like `db-postgres` / `postgres-db`) groups up to 4 same-type memories. No LLM cost when
+   nothing looks alike. (Planned: replace this pass with embedding proximity.)
+2. **Confirmation** — one LLM call per group decides whether they really record the same
+   fact and writes the merged text (no information may be lost; on contradiction the newer
+   value wins). Uses `recallProvider`/`recallModel` if set, else the session's model.
+3. **Merge** — the merged text is written under the surviving name; the others are NOT
+   deleted but marked `superseded → survivor` (hidden from the index and recall, restorable
+   from the panel). A record edited in the meantime is skipped.
+
+Pinned, disabled, disputed and expired memories are never touched; merges never cross layers
+(personal never moves into shared); the shared layer is not curated in this version. A
+`.curated` stamp in each layer directory limits passes to `curateIntervalHours`.
 
 ## Multi-user (1.8.0)
 

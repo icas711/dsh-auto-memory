@@ -40,6 +40,8 @@ export interface Config {
   autoSummarizeMaxMemories: number
   /** 固化模型调用的输出 token 上限。 */
   autoSummarizeMaxTokens: number
+  /** 1.7.0:每累计多少条新的用户消息,在回合边界增量固化一次(长会话没有"结束"时刻)。 */
+  autoSummarizeEveryTurns: number
   /** #17 固化价值门槛:候选有效分(importance ?? 类型缺省)低于此值直接丢弃,不落盘。 */
   minImportance: number
   /** P1:软淘汰阈值(天)——超过且从未被读取的记忆在索引重建时从注入索引隐藏(文件保留)。0 禁用。 */
@@ -61,9 +63,10 @@ export const Config: z<Config> = z.object({
   maxBytes: z.number().default(4096),
   memoryDir: z.string(),
   enableUserScope: z.boolean().default(true),
-  autoSummarize: z.boolean().default(false),
+  autoSummarize: z.boolean().default(true),
   autoSummarizeMaxMemories: z.number().default(5),
   autoSummarizeMaxTokens: z.number().default(2048),
+  autoSummarizeEveryTurns: z.number().default(3),
   minImportance: z.number().default(4),
   staleAfterDays: z.number().default(0),
   recall: z.boolean().default(true),

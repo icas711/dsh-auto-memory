@@ -223,7 +223,8 @@ describe('агент/pre-step: подключение через плагин', 
   })
   afterEach(async () => {
     await ctx.fiber.dispose()
-    await fsp.rm(root, { recursive: true, force: true })
+    // touch() пишет счётчик чтений в фоне — повторные попытки вместо гонки с удалением
+    await fsp.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   })
 
   it('без сервиса llm шаг проходит без изменений (fail-open)', async () => {
@@ -231,7 +232,7 @@ describe('агент/pre-step: подключение через плагин', 
     await ctx.plugin(ToolRuntime, {})
     await ctx.plugin(autoMemory, {
       maxBytes: 4096, memoryDir: root, enableUserScope: true, autoSummarize: false, autoSummarizeMaxMemories: 5,
-      autoSummarizeMaxTokens: 2048, minImportance: 4, staleAfterDays: 0,
+      autoSummarizeMaxTokens: 2048, autoSummarizeEveryTurns: 3, minImportance: 4, staleAfterDays: 0,
       recall: true, recallMaxMemories: 4, recallMaxBytes: 3000, recallTimeoutMs: 2000,
     })
     const store = new MemoryStore(root)

@@ -62,6 +62,8 @@ export interface ConsolidationOptions {
   enableUserScope: boolean
   /** #17 候选有效分(importance ?? DEFAULT_IMPORTANCE[type])低于此值丢弃;0 禁用。 */
   minImportance: number
+  /** 1.7.0:每累计多少条新的用户消息,在回合边界(agent/turn-stopping)增量固化一次;缺省 3。 */
+  autoSummarizeEveryTurns?: number
 }
 
 /** 一条固化候选(LLM 输出的一个元素,sanitize 前)。 */
@@ -311,7 +313,20 @@ ${transcript}
 
 interface SessionCapture {
   cwd: string | undefined
+  /** 滚动窗口:仅供注入侧取词集(getQueryText),与固化游标无关。 */
   lines: string[]
+  /** 固化游标:自上次固化以来尚未处理的行(autoSummarize 开时才累积)。 */
+  pending: string[]
+  /** pending 中新的真实用户消息数(触发阈值计数)。 */
+  pendingUsers: number
+  /** 该会话已有一次固化在途(同会话不并发,新内容留在 pending 等下一次)。 */
+  busy: boolean
+}
+
+/** 固化需要的最小 agent 形状(真实 Agent 结构兼容)。 */
+interface AgentLike {
+  session: { id: NonNullable<GenerateOptions['sessionId']>, header: { cwd?: string, delegationDepth?: number } }
+  options: { provider?: string, model?: string, subagentDepth?: number }
 }
 
 /** 挂载自动固化监听(autoSummarize=false 时 no-op)。 */
@@ -337,6 +352,19 @@ export function registerConsolidation(ctx: Context, store: MemoryStore, options:
   // teardown 时中止在途 LLM 调用(否则排空只能干等截断输出;审查 minor 修复)
   const abort = new AbortController()
 
+  const everyTurns = (): number => Math.max(1, Math.floor(options.autoSummarizeEveryTurns ?? 3))
+
+  const record = (session: { id: string, header: { cwd?: string } }, line: string, isUser: boolean): void => {
+    const cap = captures.get(session.id) ?? { cwd: session.header.cwd, lines: [], pending: [], pendingUsers: 0, busy: false }
+    cap.cwd = session.header.cwd ?? cap.cwd
+    cap.lines = appendCapped(cap.lines, line)
+    if (options.autoSummarize) {
+      cap.pending = appendCapped(cap.pending, line)
+      if (isUser) cap.pendingUsers += 1
+    }
+    captures.set(session.id, cap)
+  }
+
   ctx.on('session/event', (session, event) => {
     if (event.type === 'user/message') {
       const message = event.data
@@ -344,41 +372,38 @@ export function registerConsolidation(ctx: Context, store: MemoryStore, options:
       if (message.source?.kind !== 'user') return
       const text = captureText('user', message as { content: unknown })
       if (text === null) return
-      const cap = captures.get(session.id) ?? { cwd: session.header.cwd, lines: [] }
-      cap.cwd = session.header.cwd ?? cap.cwd
-      cap.lines = appendCapped(cap.lines, `USER: ${text}`)
-      captures.set(session.id, cap)
+      record(session, `USER: ${text}`, true)
     } else if (event.type === 'assistant/message') {
       if (!options.autoSummarize) return // 固化关:只留 USER 捕获(词集),ASSISTANT 不需要
       const text = captureText('assistant', event.data.message as { content: unknown })
       if (text === null) return
-      const cap = captures.get(session.id) ?? { cwd: session.header.cwd, lines: [] }
-      cap.cwd = session.header.cwd ?? cap.cwd
-      cap.lines = appendCapped(cap.lines, `ASSISTANT: ${text}`)
-      captures.set(session.id, cap)
+      record(session, `ASSISTANT: ${text}`, false)
     }
   })
 
-  ctx.on('agent/disposed', ({ agent }) => {
-    const cap = captures.get(agent.session.id)
-    if (cap === undefined) return
-    // 固化关:autoSummarize 分支整体跳过,但缓冲保留到 session/disposed
-    // (#18 词集源生命周期与固化解耦,不能在此取走)
-    if (!options.autoSummarize) return
-    // 无论是否固化都取走缓冲:subagent 的捕获也会在此清理,否则常驻进程
-    // 的 captures Map 随子代理会话无界增长(审查 major 修复)
-    captures.delete(agent.session.id)
+  /**
+   * 取走游标之后的新内容并在后台固化一次(1.7.0 增量)。前置条件不满足(子代理/无 cwd/
+   * 无路由/无 llm 服务/没有新的用户行)静默返回,缓冲原样保留。
+   */
+  const startConsolidation = (agent: AgentLike, cap: SessionCapture): void => {
     // 过滤 subagent:固化只针对根会话(child 的内容会在父会话流中体现)
     const depth = Math.max(agent.session.header.delegationDepth ?? 0, agent.options.subagentDepth ?? 0)
     if (depth > 0) return
     const cwd = cap.cwd ?? agent.session.header.cwd
-    if (cwd === undefined) return
     const provider = agent.options.provider
     const model = agent.options.model
-    if (provider === undefined || model === undefined) return // 无路由信息,放弃(静默)
+    if (cwd === undefined || provider === undefined || model === undefined) return // 无路由信息,放弃(静默)
     // 机会式获取 llm 服务:autoSummarize 部署(base)必有;无服务的组合(如测试栈)静默跳过
     const llm = ctx.get('llm')
     if (llm === undefined) return
+    if (!cap.pending.some(line => line.startsWith('USER: '))) return
+
+    const lines = cap.pending
+    cap.pending = []
+    cap.pendingUsers = 0
+    cap.busy = true
+    const sessionId = agent.session.id
+    let ok = true
 
     const task = (async (): Promise<void> => {
       try {
@@ -388,7 +413,7 @@ export function registerConsolidation(ctx: Context, store: MemoryStore, options:
         const digest = await collectInstructionDigest(cwd, resolveDshHome())
         const prompt = buildConsolidationPrompt(
           existing.map(r => r.name),
-          cap.lines.join('\n\n'),
+          lines.join('\n\n'),
           options.autoSummarizeMaxMemories,
           digest,
         )
@@ -401,7 +426,7 @@ export function registerConsolidation(ctx: Context, store: MemoryStore, options:
             source: { kind: 'dsh-auto-memory' },
           })],
           maxTokens: options.autoSummarizeMaxTokens,
-          sessionId: agent.session.id,
+          sessionId: sessionId,
           signal: abort.signal,
         }
         for await (const chunk of llm.stream(request)) assembler.push(chunk)
@@ -409,6 +434,7 @@ export function registerConsolidation(ctx: Context, store: MemoryStore, options:
         const finish = assembler.finish
         if (finish.kind === 'error') {
           ctx.logger.warn('[dsh-auto-memory] consolidation llm failed')
+          ok = false
           return
         }
         if (finish.kind === 'aborted') return // teardown 中止属正常,不告警
@@ -416,6 +442,7 @@ export function registerConsolidation(ctx: Context, store: MemoryStore, options:
           // 审查 minor:evidence 抬高输出体积后截断边际变窄——截断会让
           // parseCandidates 找不到尾 ] 而整批丢弃,必须与"模型格式错误"可区分
           ctx.logger.warn('[dsh-auto-memory] consolidation output truncated at max_tokens; raising autoSummarizeMaxTokens is recommended')
+          ok = false
           return
         }
         const text = assembler.blocks()
@@ -425,12 +452,13 @@ export function registerConsolidation(ctx: Context, store: MemoryStore, options:
         const candidates = parseCandidates(text)
         if (candidates === null) {
           ctx.logger.warn('[dsh-auto-memory] consolidation output was not a JSON array; skipped')
+          ok = false
           return
         }
         let written = 0
         for (const raw of candidates) {
           if (written >= options.autoSummarizeMaxMemories) break
-          const candidate = sanitizeCandidate(raw, options.enableUserScope, { sessionId: agent.session.id, transcript: cap.lines.join('\n\n') })
+          const candidate = sanitizeCandidate(raw, options.enableUserScope, { sessionId: sessionId, transcript: lines.join('\n\n') })
           if (candidate === null) continue
           const existingAll = await store.listAll(cwd)
           // 同一性判定(0.7.0 更新替换语义):name 锚定/精确同名/描述复述 → 更新
@@ -515,10 +543,38 @@ export function registerConsolidation(ctx: Context, store: MemoryStore, options:
         if (written > 0) ctx.logger.info(`[dsh-auto-memory] consolidated ${written} memor${written === 1 ? 'y' : 'ies'}`)
       } catch (error) {
         ctx.logger.warn(`[dsh-auto-memory] consolidation failed: ${String(error)}`)
+        ok = false
       }
     })()
     active.add(task)
-    void task.finally(() => { active.delete(task) })
+    void task.finally(() => {
+      active.delete(task)
+      cap.busy = false
+      // 失败(LLM 错误/截断/非 JSON)时把这一批放回游标前面,下次阈值到达再试;
+      // 不重置计数 → 持续故障时自然退避,不会每个回合都付费重试
+      if (!ok) cap.pending = [...lines, ...cap.pending].slice(-MAX_TURNS)
+    })
+  }
+
+  // 回合边界触发(durable 回合末,不阻塞:这里只启动后台任务,不 await)。
+  // dsh 没有"会话关闭"事件,长会话靠这里增量落盘。
+  ctx.on('agent/turn-stopping', ({ agent }) => {
+    if (!options.autoSummarize) return
+    const cap = captures.get(agent.session.id)
+    if (cap === undefined || cap.busy || cap.pendingUsers < everyTurns()) return
+    startConsolidation(agent, cap)
+  })
+
+  ctx.on('agent/disposed', ({ agent }) => {
+    const cap = captures.get(agent.session.id)
+    if (cap === undefined) return
+    // 固化关:缓冲保留到 session/disposed(#18 词集源生命周期与固化解耦,不能在此取走)
+    if (!options.autoSummarize) return
+    // 无论是否固化都取走缓冲:subagent 的捕获也会在此清理,否则常驻进程
+    // 的 captures Map 随子代理会话无界增长(审查 major 修复)
+    captures.delete(agent.session.id)
+    // best-effort 收尾:只处理游标之后尚未固化的尾巴(之前的已经在回合边界落盘)
+    startConsolidation(agent, cap)
   })
 
   // 会话离开 live store 时兜底清理缓冲(agent/disposed 未覆盖的关闭路径)

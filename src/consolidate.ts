@@ -28,6 +28,7 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { MemoryStore } from './store.ts'
 import { normalizeName, asMemoryType, DEFAULT_IMPORTANCE } from './store.ts'
+import { ownerOf } from './owner.ts'
 import { decideConsolidationAction, detectContradictions, words } from './matching.ts'
 import { collectInstructionDigest } from './instructions.ts'
 import type { MemoryEvidence, MemoryScope, MemoryStatus, MemoryType } from './types.ts'
@@ -60,6 +61,8 @@ export interface ConsolidationOptions {
   autoSummarizeMaxMemories: number
   autoSummarizeMaxTokens: number
   enableUserScope: boolean
+  /** 1.8.0:允许固化产出 scope=shared 的候选(进入审核队列;缺省 = 允许)。 */
+  enableSharedScope?: boolean
   /** #17 候选有效分(importance ?? DEFAULT_IMPORTANCE[type])低于此值丢弃;0 禁用。 */
   minImportance: number
   /** 1.7.0:每累计多少条新的用户消息,在回合边界(agent/turn-stopping)增量固化一次;缺省 3。 */
@@ -207,7 +210,7 @@ export function isChitchat(text: string): boolean {
  * 还会再查一次 description,双保险幂等)。evidence 走调用点传入的
  * sessionId + LLM 摘录。返回 null 表示丢弃。
  */
-export function sanitizeCandidate(raw: RawCandidate, enableUserScope: boolean, opts?: { sessionId?: string; transcript?: string }): SanitizedCandidate | null {
+export function sanitizeCandidate(raw: RawCandidate, enableUserScope: boolean, opts?: { sessionId?: string; transcript?: string; enableSharedScope?: boolean }): SanitizedCandidate | null {
   try {
     const name = normalizeName(String(raw.name ?? ''))
     const description = String(raw.description ?? '').trim().slice(0, 160)
@@ -215,7 +218,11 @@ export function sanitizeCandidate(raw: RawCandidate, enableUserScope: boolean, o
     const title = typeof raw.title === 'string' && raw.title.trim().length > 0 ? raw.title.trim().slice(0, 80) : undefined
     if (description.length === 0 || body.length === 0) return null
     const type = asMemoryType(String(raw.type ?? 'reference'))
-    const scope: MemoryScope = raw.scope === 'user' ? (enableUserScope ? 'user' : 'project') : 'project'
+    // shared 只在部署开启时放行;关闭时降回 project(与 user 层同款降级,不丢事实)。
+    // 无论谁固化,共享候选恒为 candidate(下方 status),由管理员审核后才对全员生效
+    const scope: MemoryScope = raw.scope === 'shared' && opts?.enableSharedScope !== false
+      ? 'shared'
+      : raw.scope === 'user' && enableUserScope ? 'user' : 'project'
     const importance = typeof raw.importance === 'number' && Number.isSafeInteger(raw.importance)
       ? Math.min(10, Math.max(1, raw.importance)) : undefined
     // 有效期(1.6.0):时效性事实(计划/价格/版本/日程)由固化模型给保质期天数;
@@ -260,7 +267,7 @@ export function sanitizeCandidate(raw: RawCandidate, enableUserScope: boolean, o
  * 已记载的约束,避免把"代码注释用中文"这类稳定约束再固化成记忆(分诊规则:
  * 人写稳定约束→AGENTS.md,模型动态事实→记忆,同一事实只落一处)。
  */
-export function buildConsolidationPrompt(existingNames: string[], transcript: string, maxMemories: number, instructionsDigest?: string): string {
+export function buildConsolidationPrompt(existingNames: string[], transcript: string, maxMemories: number, instructionsDigest?: string, allowShared = false): string {
   const known = existingNames.length > 0 ? existingNames.join(', ') : '(none)'
   const instructions = instructionsDigest !== undefined && instructionsDigest.trim().length > 0
     ? `The workspace instruction files below are ALREADY injected into every session of this
@@ -299,7 +306,13 @@ Return ONLY a JSON array, each element exactly:
 {"name":"kebab-case-id","title":"short human heading","description":"one line <=160 chars","type":"user|feedback|project|reference","body":"the fact in markdown; for feedback include **Why:** and **How to apply:** lines","scope":"project","importance":5,"validUntilDays":90,"evidence":"1-2 sentence VERBATIM quote from the transcript that supports this fact"}
 "evidence" must be copied word-for-word from the transcript above — do not
 paraphrase. If you cannot quote a supporting line, do not output that item.
-Use scope "user" only for user-global preferences; default "project".
+Use scope "user" only for user-global preferences; default "project".${allowShared
+  ? `
+Use scope "shared" ONLY for durable facts that would help EVERY colleague in the
+department (regulations, standards, common terminology, shared resources) — never
+for anything personal, private, or specific to one employee. Shared items are
+reviewed by an admin before anyone sees them.`
+  : ''}
 Write "name" in kebab-case English; write title/description/body in the SAME
 language as the transcript (a Chinese transcript gets Chinese memories —
 the user will read them).
@@ -325,7 +338,7 @@ interface SessionCapture {
 
 /** 固化需要的最小 agent 形状(真实 Agent 结构兼容)。 */
 interface AgentLike {
-  session: { id: NonNullable<GenerateOptions['sessionId']>, header: { cwd?: string, delegationDepth?: number } }
+  session: { id: NonNullable<GenerateOptions['sessionId']>, header: { cwd?: string, delegationDepth?: number, owner?: string } }
   options: { provider?: string, model?: string, subagentDepth?: number }
 }
 
@@ -344,7 +357,7 @@ export interface ConsolidationHandle {
   cleanup: (sessionId: string) => void
 }
 
-export function registerConsolidation(ctx: Context, store: MemoryStore, options: ConsolidationOptions): ConsolidationHandle {
+export function registerConsolidation(ctx: Context, baseStore: MemoryStore, options: ConsolidationOptions): ConsolidationHandle {
   const captures = new Map<string, SessionCapture>()
   // autoSummarize=false 时无固化,但仍保留 USER 捕获(#18 相关性截断的词集源,
   // 与固化开关解耦——注入侧的相关性不应依赖后台总结是否开启)
@@ -403,11 +416,14 @@ export function registerConsolidation(ctx: Context, store: MemoryStore, options:
     cap.pendingUsers = 0
     cap.busy = true
     const sessionId = agent.session.id
+    // 1.8.0:个人层按会话登录用户取视图;共享写入的权限/审核在 store 单点
+    const store = baseStore.withOwner(ownerOf(agent))
+    const allowShared = options.enableSharedScope !== false
     let ok = true
 
     const task = (async (): Promise<void> => {
       try {
-        const existing = await store.listAll(cwd)
+        const existing = [...await store.listAll(cwd), ...(allowShared ? await store.list('shared') : [])]
         // 工作区指令链摘要(0.7.2):固化模型看不到基线消息,喂摘要防重复固化;
         // 读取失败静默降级为无摘要,绝不影响固化本身
         const digest = await collectInstructionDigest(cwd, resolveDshHome())
@@ -416,6 +432,7 @@ export function registerConsolidation(ctx: Context, store: MemoryStore, options:
           lines.join('\n\n'),
           options.autoSummarizeMaxMemories,
           digest,
+          allowShared,
         )
         const assembler = new BlockAssembler()
         const request: GenerateOptions = {
@@ -458,9 +475,14 @@ export function registerConsolidation(ctx: Context, store: MemoryStore, options:
         let written = 0
         for (const raw of candidates) {
           if (written >= options.autoSummarizeMaxMemories) break
-          const candidate = sanitizeCandidate(raw, options.enableUserScope, { sessionId: sessionId, transcript: lines.join('\n\n') })
+          const candidate = sanitizeCandidate(raw, options.enableUserScope, { sessionId: sessionId, transcript: lines.join('\n\n'), enableSharedScope: allowShared })
           if (candidate === null) continue
-          const existingAll = await store.listAll(cwd)
+          // 单候选失败(共享层权限拒绝、锁/IO 错误)只跳过该条,不拖垮整批——
+          // 个人事实不应因一条共享候选被拒而丢失
+          try {
+          // 查重池按候选所在层划分:共享候选只与共享记忆比对,个人候选只与 user+project 比对
+          // (跨层同名/近义不得互相覆盖——个人内容绝不能因"相似"改写到全员可见层)
+          const existingAll = candidate.scope === 'shared' ? await store.list('shared') : await store.listAll(cwd)
           // 同一性判定(0.7.0 更新替换语义):name 锚定/精确同名/描述复述 → 更新
           // 现有记忆(复用其 name/scope 与生命周期,覆写内容)而非跳过或并存;
           // 无匹配 → 新建。L3 暴露的两 bug(新旧并存、同义重复)由此闭环。
@@ -539,6 +561,9 @@ export function registerConsolidation(ctx: Context, store: MemoryStore, options:
           // create 分支:候选折算透传(与 update/supersede 同一 helper)
           await store.write(withValidUntil(candidate), candidate.scope, cwd)
           written += 1
+          } catch (error) {
+            ctx.logger.warn(`[dsh-auto-memory] consolidation candidate "${candidate.name}" skipped: ${String(error)}`)
+          }
         }
         if (written > 0) ctx.logger.info(`[dsh-auto-memory] consolidated ${written} memor${written === 1 ? 'y' : 'ies'}`)
       } catch (error) {

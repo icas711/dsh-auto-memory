@@ -31,6 +31,7 @@ import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { MemoryStore } from './store.ts'
 import { isInjectable, stripMemoryTags } from './store.ts'
+import { ownerOf } from './owner.ts'
 import { descriptionCoverage } from './matching.ts'
 import type { MemoryRecord } from './types.ts'
 
@@ -48,11 +49,13 @@ export interface RecallOptions {
   recallProvider?: string
   recallModel?: string
   enableUserScope: boolean
+  /** 1.8.0:共享层是否参与召回(缺省 = 参与)。 */
+  enableSharedScope?: boolean
 }
 
 /** 召回需要的最小 agent 形状(真实 Agent 结构兼容;便于测试注入替身)。 */
 export interface RecallAgent {
-  session: { id: NonNullable<GenerateOptions['sessionId']>, header: { cwd?: string, delegationDepth?: number } }
+  session: { id: NonNullable<GenerateOptions['sessionId']>, header: { cwd?: string, delegationDepth?: number, owner?: string } }
   options: { provider?: string, model?: string, subagentDepth?: number }
 }
 
@@ -212,7 +215,7 @@ function recallSource(): UserMessage['source'] {
   return { kind: 'plugin', plugin: 'dsh-auto-memory', form: 'recall' } as UserMessage['source']
 }
 
-export function createRecaller(store: MemoryStore, options: RecallOptions, select: RecallSelector): Recaller {
+export function createRecaller(baseStore: MemoryStore, options: RecallOptions, select: RecallSelector): Recaller {
   /** sessionId → 已展示过的 `${scope}:${name}`。 */
   const surfaced = new Map<string, Set<string>>()
 
@@ -226,9 +229,12 @@ export function createRecaller(store: MemoryStore, options: RecallOptions, selec
         if (query === undefined || query.length < MIN_QUERY_CHARS) return null
 
         const cwd = agent.session.header.cwd
+        // 1.8.0:个人层按会话登录用户取视图;共享层全员相同(候选由 isInjectable 排除)
+        const store = baseStore.withOwner(ownerOf(agent))
         const records: MemoryRecord[] = []
         if (options.enableUserScope) records.push(...await store.list('user'))
         if (cwd !== undefined) records.push(...await store.list('project', cwd))
+        if (options.enableSharedScope !== false) records.push(...await store.list('shared'))
         const now = Date.now()
         const seen = surfaced.get(agent.session.id) ?? new Set<string>()
         const candidates = records.filter(record => isInjectable(record, now) && !seen.has(`${record.scope}:${record.name}`))

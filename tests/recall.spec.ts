@@ -233,7 +233,7 @@ describe('агент/pre-step: подключение через плагин', 
     await ctx.plugin(autoMemory, {
       maxBytes: 4096, memoryDir: root, enableUserScope: true, autoSummarize: false, autoSummarizeMaxMemories: 5,
       autoSummarizeMaxTokens: 2048, autoSummarizeEveryTurns: 3, minImportance: 4, staleAfterDays: 0,
-      recall: true, recallMaxMemories: 4, recallMaxBytes: 3000, recallTimeoutMs: 2000,
+      recall: true, recallMaxMemories: 4, recallMaxBytes: 3000, recallTimeoutMs: 2000, admins: [], enableSharedScope: true,
     })
     const store = new MemoryStore(root)
     await store.write({ name: 'language', description: 'Отвечать по-русски', type: 'feedback', body: 'Отвечать по-русски' }, 'user')

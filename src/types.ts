@@ -7,8 +7,11 @@
 /** 记忆类型(对齐 Claude Code 的四种语义)。 */
 export type MemoryType = 'user' | 'feedback' | 'project' | 'reference'
 
-/** 作用域:项目级(workspace 隔离)或用户级(所有会话共享)。 */
-export type MemoryScope = 'project' | 'user'
+/**
+ * 作用域:项目级(workspace 隔离)、用户级(该登录用户的所有会话)、
+ * 共享级(1.8.0:全部员工共读;写入经管理员审核,见 MemoryStore 的权限单点)。
+ */
+export type MemoryScope = 'project' | 'user' | 'shared'
 
 /**
  * 记忆可信状态(1.0.0 可信记忆)。缺省(undefined)= 信任态:旧文件与用户
@@ -81,6 +84,11 @@ export interface MemoryRecord {
   validUntil?: number
   /** 导入溯源(缺省 = 非导入记忆);仅导入桥写入,撤销导入据此判定。 */
   origin?: MemoryOrigin
+  /**
+   * 作者(1.8.0,仅共享层):写入者的 owner。由 store 在锁内盖章,调用方传入的值被忽略
+   * ——作者身份不可伪造。非管理员只能改/删自己的、未审核的共享记忆。
+   */
+  author?: string
   /** 生命周期元数据(P1 遗忘策略用;旧文件缺省时由解析层补全)。 */
   createdMs?: number
   updatedMs?: number
@@ -90,3 +98,9 @@ export interface MemoryRecord {
 
 /** 用户级作用域的目录名(下划线前缀避免与项目 slug `--...--` 冲突)。 */
 export const USER_SCOPE_DIR = '_user'
+
+/** 共享层目录名(1.8.0;永远在记忆根下,不随登录用户变化)。 */
+export const SHARED_SCOPE_DIR = '_shared'
+
+/** 非本机登录用户的个人根:`<memoryDir>/_owners/<ownerKey>/`(内部布局与旧版完全一致)。 */
+export const OWNERS_DIR = '_owners'

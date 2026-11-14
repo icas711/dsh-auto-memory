@@ -20,6 +20,7 @@ import { MEMORY_SECTION, renderMemoryIndexText } from './prompt.ts'
 import { registerInjectionAudit } from './audit.ts'
 import { registerConsolidation } from './consolidate.ts'
 import { registerRecall } from './recall.ts'
+import { ownerOf } from './owner.ts'
 import { registerMemoryApi } from './memory-api.ts'
 import { loadSettings, applySettings, SETTABLE_FIELDS } from './settings.ts'
 
@@ -57,6 +58,10 @@ export interface Config {
   /** 选择器专用 provider/model(须成对设置;留空 = 沿用会话模型)。 */
   recallProvider?: string
   recallModel?: string
+  /** 1.8.0:共享层管理员(登录名 = session.header.owner,大小写不敏感);本机/CLI 会话恒为管理员。 */
+  admins: string[]
+  /** 1.8.0:是否启用全员共享层(_shared;非管理员写入需审核)。 */
+  enableSharedScope: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -75,6 +80,8 @@ export const Config: z<Config> = z.object({
   recallTimeoutMs: z.number().default(6000),
   recallProvider: z.string(),
   recallModel: z.string(),
+  admins: z.array(z.string()).default([]),
+  enableSharedScope: z.boolean().default(true),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -90,10 +97,11 @@ export function apply(ctx: Context, config: Config): void {
   const profileDefaults: Config = { ...config }
   const live: Config = { ...config }
   void loadSettings(rootDir).then(overrides => { Object.assign(live, overrides) })
-  const store = new MemoryStore(rootDir, {})
-  Object.defineProperty(store, 'staleAfterDays', {
-    get: () => live.staleAfterDays,
-    configurable: true,
+  // 1.8.0:staleAfterDays/admins 以读时求值函数传入——withOwner 派生的各用户视图
+  // 共享同一 live 来源(设置中心改动对所有视图即时生效)
+  const store = new MemoryStore(rootDir, {
+    staleAfterDays: () => live.staleAfterDays,
+    admins: () => live.admins,
   })
 
   registerMemoryTools(ctx, store, live)
@@ -122,8 +130,10 @@ export function apply(ctx: Context, config: Config): void {
     if (cwd === undefined) return
     if (refreshed.has(agent.session.id)) return
     refreshed.add(agent.session.id)
-    void store.refreshIndex('project', cwd)
-    if (live.enableUserScope) void store.refreshIndex('user')
+    const view = store.withOwner(ownerOf(agent))
+    void view.refreshIndex('project', cwd)
+    if (live.enableUserScope) void view.refreshIndex('user')
+    if (live.enableSharedScope) void view.refreshIndex('shared')
   })
   ctx.on('session/disposed', session => { refreshed.delete(session.id) })
 
@@ -146,7 +156,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.systemPrompt.section({
     name: MEMORY_SECTION,
     order: 4000,
-    text: context => audit.text(context.agent?.session.header.cwd, context.agent?.session.id),
+    text: context => audit.text(context.agent?.session.header.cwd, context.agent?.session.id, ownerOf(context.agent)),
   })
   ctx.on('session/disposed', session => {
     audit.cleanup(session.id)

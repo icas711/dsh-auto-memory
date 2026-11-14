@@ -262,15 +262,17 @@ export function aggregateAudit(entries: AuditEntry[], sessionsLimit = 50, store?
 export function registerInjectionAudit(
   store: MemoryStore, config: Config, rootDir: string,
   getQueryText?: (sessionId: string) => string | undefined,
-): { text: (cwd: string | undefined, sessionId: string | undefined) => string; cleanup: (sessionId: string) => void; flush: () => Promise<void> } {
+): { text: (cwd: string | undefined, sessionId: string | undefined, owner?: string) => string; cleanup: (sessionId: string) => void; flush: () => Promise<void> } {
   /** sessionId → 最近注入集合签名(含截断名单与 cwd——换工作区重算)。 */
   const lastSignature = new Map<string, string>()
   /** sessionId → 冻结的相关性查询词集(#18;与 lastSignature 同生命周期)。 */
   const frozenQuery = new Map<string, string>()
   return {
-    text: (cwd, sessionId) => {
+    text: (cwd, sessionId, owner) => {
+    // 1.8.0:按会话登录用户取个人层视图(共享层对所有视图相同)
+    const view = store.withOwner(owner)
     let query = sessionId !== undefined ? frozenQuery.get(sessionId) : undefined
-    let detail = renderMemoryIndexDetail(store, config, cwd, query)
+    let detail = renderMemoryIndexDetail(view, config, cwd, query)
     if (detail.text.length === 0 || sessionId === undefined || cwd === undefined) {
       // 注入转空(会话中途 delete_all/删光):不记空事件,但必须复位该会话
       // 签名——否则空档后同名集合回归会被残留签名吞掉,真实再注入漏记(审查实测)。
@@ -290,7 +292,7 @@ export function registerInjectionAudit(
       if (fresh !== undefined && fresh.trim().length > 0) {
         frozenQuery.set(sessionId, fresh)
         query = fresh
-        detail = renderMemoryIndexDetail(store, config, cwd, query)
+        detail = renderMemoryIndexDetail(view, config, cwd, query)
       }
     }
     // Пустая инъекция (только инструкция, записей нет) — не событие аудита

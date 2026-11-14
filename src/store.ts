@@ -21,7 +21,7 @@ import { join } from 'node:path'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { writeFileAtomic, withFileLock } from '@deepseek-ai/dsh-atomic-write'
 import type { MemoryEvidence, MemoryOrigin, MemoryRecord, MemoryScope, MemoryStatus, MemoryType } from './types.ts'
-import { USER_SCOPE_DIR } from './types.ts'
+import { OWNERS_DIR, SHARED_SCOPE_DIR, USER_SCOPE_DIR } from './types.ts'
 
 const MEMORY_TYPES: readonly MemoryType[] = ['user', 'feedback', 'project', 'reference'] as const
 
@@ -179,7 +179,7 @@ export function parseMemory(raw: string, scope: MemoryScope): MemoryRecord | nul
   try {
     const fm = parseFrontmatter(raw)
     if (!fm) return null
-    const { name, description, type, title, created, updated, lastRead, reads, pinned, importance, disabled, origin, status, evidence, supersededBy, supersedes, validUntil } = fm.data
+    const { name, description, type, title, created, updated, lastRead, reads, pinned, importance, disabled, origin, status, evidence, supersededBy, supersedes, validUntil, author } = fm.data
     if (typeof name !== 'string' || typeof description !== 'string' || description.trim().length === 0) return null
     const parsedType = type === undefined ? 'reference' : asMemoryType(String(type))
     const asMs = (value: unknown): number | undefined =>
@@ -220,6 +220,7 @@ export function parseMemory(raw: string, scope: MemoryScope): MemoryRecord | nul
       ...(asLineage(supersedes) !== undefined ? { supersedes: asLineage(supersedes)! } : {}),
       ...(asMs(validUntil) !== undefined ? { validUntil: asMs(validUntil)! } : {}),
       ...(parsedOrigin !== undefined ? { origin: parsedOrigin } : {}),
+      ...(typeof author === 'string' && author.trim().length > 0 ? { author: author.trim().slice(0, 128) } : {}),
       createdMs: asMs(created),
       updatedMs: asMs(updated),
       lastReadMs: asMs(lastRead),
@@ -258,6 +259,7 @@ export function serializeMemory(record: Omit<MemoryRecord, 'scope'>): string {
         hash: record.origin.hash,
       },
     } : {}),
+    ...(record.author !== undefined ? { author: record.author } : {}),
     ...(record.createdMs !== undefined ? { created: record.createdMs } : {}),
     ...(record.updatedMs !== undefined ? { updated: record.updatedMs } : {}),
     ...(record.lastReadMs !== undefined ? { lastRead: record.lastReadMs } : {}),
@@ -295,7 +297,26 @@ export function isInjectable(record: MemoryRecord, nowMs: number): boolean {
   return record.disabled !== true
     && record.status !== 'disputed'
     && record.status !== 'superseded'
+    // 共享层:未经管理员审核的候选对任何人都不进模型上下文(索引与召回同口径)——
+    // 否则一个员工写入的内容会未经审核注入所有同事(含管理员)的会话
+    && !(record.scope === 'shared' && record.status === 'candidate')
     && !isExpired(record, nowMs)
+}
+
+/** 登录名归一(去空白+小写):admins 名单与 owner 比较用。 */
+function normalizeOwner(owner: string): string {
+  return owner.trim().toLowerCase()
+}
+
+/**
+ * 登录用户的个人根目录键:可读 slug + 原值哈希(不同登录名不碰撞,也没有路径穿越面)。
+ * 本机/CLI 会话没有 owner → 返回 undefined,沿用旧版目录布局(升级零迁移)。
+ */
+export function ownerDirKey(owner: string | undefined): string | undefined {
+  if (owner === undefined) return undefined
+  const slug = owner.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 40)
+  const hash = createHash('sha256').update(owner).digest('hex').slice(0, 10)
+  return `${slug.length > 0 ? slug : 'u'}-${hash}`
 }
 
 /**
@@ -492,21 +513,121 @@ export interface MemoryWriteInput extends Omit<MemoryRecord, 'scope' | 'origin'>
   origin?: Omit<MemoryOrigin, 'hash'>
 }
 
+export interface MemoryStoreOptions {
+  /** 数值或读时求值的函数(设置中心热切换:视图共享同一个 live 来源)。 */
+  staleAfterDays?: number | (() => number)
+  /** 共享层管理员(登录名,大小写不敏感)。本机/CLI 会话(无 owner)恒为管理员。 */
+  admins?: readonly string[] | (() => readonly string[])
+  /** 内部:该视图所属登录用户;请用 withOwner()。 */
+  owner?: string
+}
+
 export class MemoryStore {
-  constructor(rootDir: string, options?: { staleAfterDays?: number }) {
-    this.rootDir = rootDir
-    this.staleAfterDays = options?.staleAfterDays ?? 0
+  constructor(rootDir: string, options?: MemoryStoreOptions) {
+    this.baseRoot = rootDir
+    this.staleSource = options?.staleAfterDays ?? 0
+    this.adminSource = options?.admins ?? []
+    this.owner = options?.owner
+    const key = ownerDirKey(this.owner)
+    this.personalRoot = key === undefined ? rootDir : join(rootDir, OWNERS_DIR, key)
   }
 
-  private readonly rootDir: string
+  /** 记忆根(共享层所在;永不随登录用户变化)。 */
+  private readonly baseRoot: string
+  /** 个人层(user/project)所在根:本机 = baseRoot;登录用户 = baseRoot/_owners/<key>。 */
+  private readonly personalRoot: string
   /** 软淘汰阈值(天);0 = 禁用。索引重建时评估:陈旧零引用的记忆从索引隐藏(文件保留)。 */
-  private readonly staleAfterDays: number
+  private readonly staleSource: number | (() => number)
+  private readonly adminSource: readonly string[] | (() => readonly string[])
+  private get staleAfterDays(): number {
+    return typeof this.staleSource === 'function' ? this.staleSource() : this.staleSource
+  }
+  /** 该视图的登录用户;undefined = 本机/CLI。 */
+  readonly owner: string | undefined
+
+  /**
+   * 某登录用户的存储视图(1.8.0 多用户):个人层(user/project)落在该用户自己的根下,
+   * 共享层仍是全员共用的 `_shared`。owner 为 undefined(CLI/无登录)返回本机视图,
+   * 目录布局与旧版完全一致。所有权限判定都在本类内(调用方无法绕过)。
+   */
+  withOwner(owner: string | undefined): MemoryStore {
+    if (owner === this.owner) return this
+    return new MemoryStore(this.baseRoot, {
+      staleAfterDays: this.staleSource,
+      admins: this.adminSource,
+      ...(owner !== undefined ? { owner } : {}),
+    })
+  }
+
+  /** 是否共享层管理员:本机/CLI(无 owner)恒为是;登录用户须在 admins 名单内。 */
+  isAdmin(): boolean {
+    if (this.owner === undefined) return true
+    const list = typeof this.adminSource === 'function' ? this.adminSource() : this.adminSource
+    const me = normalizeOwner(this.owner)
+    return list.some(admin => normalizeOwner(admin) === me)
+  }
+
+  /** 该视图可见性:共享层里别人的未审核候选只有管理员和作者本人能看到。 */
+  private canSee(record: MemoryRecord): boolean {
+    if (record.scope !== 'shared' || record.status !== 'candidate') return true
+    return this.isAdmin() || (record.author !== undefined && record.author === this.owner)
+  }
+
+  /** 共享层改/删权限:管理员任意;其他人只能动自己尚未审核通过的(候选/争议)记录。 */
+  private mayModifyShared(record: MemoryRecord): boolean {
+    if (this.isAdmin()) return true
+    return record.author !== undefined
+      && record.author === this.owner
+      && (record.status === 'candidate' || record.status === 'disputed')
+  }
+
+  /**
+   * 待审核队列(仅管理员):共享层里的候选与被指令扫描拦下的争议记录。
+   * 非管理员调用抛错——审核入口不对普通员工暴露。
+   */
+  async listPending(): Promise<MemoryRecord[]> {
+    if (!this.isAdmin()) throw new Error('only admins can review shared memories')
+    const all = await this.list('shared')
+    return all.filter(record => record.status === 'candidate' || record.status === 'disputed')
+  }
+
+  /**
+   * 管理员批准共享候选 → verified(此后进入全员索引/召回)。锁内重新解析,仅管理员。
+   * 返回批准后的记录;不存在返回 null。
+   */
+  async approve(name: string): Promise<MemoryRecord | null> {
+    if (!this.isAdmin()) throw new Error('only admins can approve shared memories')
+    const dir = this.dir('shared')
+    const file = join(dir, `${normalizeName(name)}.md`)
+    let approved: MemoryRecord | null = null
+    try {
+      await withLockRecovery(join(dir, INDEX_FILENAME), async () => {
+        const record = parseMemory(await fsp.readFile(file, 'utf8').catch(() => ''), 'shared')
+        if (record === null) return
+        const next: MemoryRecord = { ...record, status: 'verified', updatedMs: Date.now() }
+        await writeFileAtomic(file, serializeMemory(next), { mode: 0o600, dirMode: 0o700 })
+        approved = next
+        await this.rebuildIndex('shared')
+      })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') return null
+      throw error
+    }
+    return approved
+  }
+
+  /** 管理员驳回共享候选(删除)。 */
+  async reject(name: string): Promise<boolean> {
+    if (!this.isAdmin()) throw new Error('only admins can reject shared memories')
+    return this.delete(name, 'shared')
+  }
 
   /** 作用域对应目录;project 作用域必须携带会话 cwd(绝不静默回退 process.cwd())。 */
   dir(scope: MemoryScope, cwd?: string): string {
-    if (scope === 'user') return join(this.rootDir, USER_SCOPE_DIR)
+    if (scope === 'shared') return join(this.baseRoot, SHARED_SCOPE_DIR)
+    if (scope === 'user') return join(this.personalRoot, USER_SCOPE_DIR)
     if (cwd === undefined) throw new Error('project scope requires a session cwd (refusing to fall back to process.cwd())')
-    return join(this.rootDir, projectKey(cwd))
+    return join(this.personalRoot, projectKey(cwd))
   }
 
   /** 列出指定作用域全部记忆(畸形文件与 symlink 跳过;按 name 稳定排序)。 */
@@ -526,7 +647,7 @@ export class MemoryStore {
       if (isSymlink(file)) continue
       const raw = await fsp.readFile(file, 'utf8').catch(() => null)
       const record = raw === null ? null : parseMemory(raw, scope)
-      if (record) records.push(record)
+      if (record && this.canSee(record)) records.push(record)
     }
     return records.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   }
@@ -536,7 +657,8 @@ export class MemoryStore {
     const file = join(this.dir(scope, cwd), `${normalizeName(name)}.md`)
     if (isSymlink(file)) return null
     const raw = await fsp.readFile(file, 'utf8').catch(() => null)
-    return raw === null ? null : parseMemory(raw, scope)
+    const record = raw === null ? null : parseMemory(raw, scope)
+    return record !== null && this.canSee(record) ? record : null
   }
 
   /** 按优先级在多个作用域检索 name。 */
@@ -548,7 +670,7 @@ export class MemoryStore {
     return null
   }
 
-  /** 合并两层作用域的全部记忆(用户级在前)。 */
+  /** 合并个人两层(用户级在前)的全部记忆;共享层请用 list('shared')。 */
   async listAll(cwd?: string): Promise<MemoryRecord[]> {
     return [...await this.list('user'), ...await this.list('project', cwd)]
   }
@@ -576,6 +698,11 @@ export class MemoryStore {
       // 文件(审查 major:同名候选 create 路径会覆写 superseded 文件使其重新
       // 注入)——superseded 只能经用户面板 restore 离开
       if (record.onlyIfAbsent === true && existing !== null) return
+      // 共享层权限(单点,调用方无法绕过):非管理员只能新建,或改自己尚未审核通过的记录
+      const sharedNonAdmin = scope === 'shared' && !this.isAdmin()
+      if (sharedNonAdmin && existing !== null && !this.mayModifyShared(existing)) {
+        throw new Error(`shared memory "${record.name}" can only be changed by an admin (it is verified or belongs to another user)`)
+      }
       // 可信状态与证据链(1.0.0,审查后统一单点语义):
       // - 调用方显式传 status → 按传入值(面板 verify/dispute/restore 是唯一
       //   人工流转入口;固化候选自带 candidate/disputed)
@@ -587,9 +714,10 @@ export class MemoryStore {
       //   不被常规流量冲掉(审查 major:复述刷新剥验证)
       // - 注入扫描在 store 单点:body/description 命中指令注入模式 → disputed。
       //   只挂固化路径会被 memory_write 直写绕过(审查 major:guard 整体可绕)
-      const pinned = record.pinned ?? existing?.pinned
-      const disabled = record.disabled ?? existing?.disabled
-      const importance = record.importance ?? existing?.importance
+      // 非管理员写共享层:置顶/停用/重要度由管理员掌控(忽略入参,沿用既有值)
+      const pinned = sharedNonAdmin ? existing?.pinned : (record.pinned ?? existing?.pinned)
+      const disabled = sharedNonAdmin ? existing?.disabled : (record.disabled ?? existing?.disabled)
+      const importance = sharedNonAdmin ? existing?.importance : (record.importance ?? existing?.importance)
       const title = record.title ?? existing?.title
       // 安全包:所有写入路径统一过脱敏 + 协议标签防护(单点拦截,含 title——
       // title 进索引行即注入内容,绕过即穿透壳/泄密,审查 blocker)
@@ -605,7 +733,13 @@ export class MemoryStore {
       // "status === 'candidate' 且内容变化"的固化形态。
       if (existing?.status === 'superseded' && record.status === 'candidate' && contentChanged) return
       let status = record.status ?? existing?.status
-      if (record.status === undefined && contentChanged) {
+      if (sharedNonAdmin) {
+        // 审核制:无论入参如何,非管理员写入的共享记忆一律是候选(命中指令模式则 disputed),
+        // 且在管理员 approve 之前对所有人(含作者自己的模型上下文)不注入
+        status = detectDirectivePattern(body) === true || detectDirectivePattern(description) === true
+          ? 'disputed'
+          : 'candidate'
+      } else if (record.status === undefined && contentChanged) {
         if (existing?.status === 'verified' || existing?.status === 'candidate') status = 'candidate'
       }
       if (record.status === undefined && (detectDirectivePattern(body) === true || detectDirectivePattern(description) === true)) status = 'disputed'
@@ -655,6 +789,19 @@ export class MemoryStore {
       }
       if (validUntil === undefined) delete next.validUntil // 哨兵 0/显式清除:键不落盘
       else next.validUntil = validUntil
+      // 作者盖章(仅共享层):沿用既有作者,新建取当前登录用户;入参里的 author 一律丢弃(不可伪造)
+      delete next.author
+      // 非管理员写共享层:...fields 展开带入了入参里的置顶/停用/重要度,这里按上面算好的值(沿用既有)覆盖
+      if (sharedNonAdmin) {
+        delete next.pinned
+        delete next.disabled
+        delete next.importance
+        if (pinned === true) next.pinned = true
+        if (disabled === true) next.disabled = true
+        if (importance !== undefined) next.importance = importance
+      }
+      const author = scope === 'shared' ? (existing?.author ?? this.owner) : undefined
+      if (author !== undefined) next.author = author
       written = next
       await writeFileAtomic(file, serializeMemory(next), { mode: 0o600, dirMode: 0o700 })
       await this.rebuildIndex(scope, cwd)
@@ -701,6 +848,7 @@ export class MemoryStore {
    * 单条失败跳过并如实计数,不虚报。
    */
   async clear(scope: MemoryScope, cwd?: string): Promise<number> {
+    if (scope === 'shared' && !this.isAdmin()) throw new Error('only admins can clear the shared memory layer')
     const dir = this.dir(scope, cwd)
     let removed = 0
     try {
@@ -749,6 +897,13 @@ export class MemoryStore {
     let removed = false
     try {
       await withLockRecovery(join(dir, INDEX_FILENAME), async () => {
+        if (scope === 'shared' && !this.isAdmin()) {
+          const current = parseMemory(await fsp.readFile(file, 'utf8').catch(() => ''), scope)
+          if (current === null) return
+          if (!this.mayModifyShared(current)) {
+            throw new Error(`shared memory "${normalizeName(name)}" can only be deleted by an admin (it is verified or belongs to another user)`)
+          }
+        }
         try {
           await fsp.unlink(file)
         } catch {
@@ -785,6 +940,9 @@ export class MemoryStore {
       await withLockRecovery(join(dir, INDEX_FILENAME), async () => {
         const record = parseMemory(await fsp.readFile(file, 'utf8').catch(() => ''), scope)
         if (record === null || !predicate(record)) return
+        if (scope === 'shared' && !this.mayModifyShared(record)) {
+          throw new Error(`shared memory "${normalizeName(name)}" can only be deleted by an admin`)
+        }
         try {
           await fsp.unlink(file)
         } catch {

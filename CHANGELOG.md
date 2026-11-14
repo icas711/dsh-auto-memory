@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 the [GitHub Releases](https://github.com/AskTheWay/dsh-auto-memory/releases)
 page (generated from this file at publish time).
 
+## [1.8.0] - 2026-11-14
+
+Multi-user memory: personal layers per login plus a moderated team-wide layer.
+
+### Added
+- Personal `user`/`project` memory is stored per `session.header.owner`
+  (`_owners/<key>/`); sessions without an owner keep the old layout.
+- Shared layer `_shared/` (`scope: shared`) visible to all employees. Non-admin
+  writes (tool or consolidation) become `candidate`s, hidden everywhere until an
+  admin approves them; store-level permissions, unforgeable `author`.
+- `memory_review` tool (list / approve / reject; approve and reject require human confirmation).
+- Config: `admins`, `enableSharedScope`. Consolidation may propose shared facts;
+  its dedupe never crosses between personal and shared layers.
+
+### Changed
+- `staleAfterDays` / `admins` are read live by every per-owner store view.
+
 ## [1.7.0] - 2026-11-14
 
 Memory that is actually used and written without being asked, and that

@@ -300,7 +300,34 @@ and where the defaults the runtime layer falls back to come from:
     recallProvider: ''           # selector provider/model, set both to use a cheaper model;
     recallModel: ''              # empty = the session's own model
     staleAfterDays: 0            # >0: soft-hide zero-read memories older than N days (files kept)
+    enableSharedScope: true      # team-wide shared layer (see "Multi-user")
+    admins: [boss@dkp]           # session.header.owner values allowed to review the shared layer
 ```
+
+## Multi-user (1.8.0)
+
+Memory is split by the login (`session.header.owner`) that deepseek-harness writes
+into authenticated web sessions:
+
+| layer | where | who sees it |
+| --- | --- | --- |
+| personal (`user`, `project`) | `<memoryDir>/_owners/<owner-key>/…` | that employee only |
+| shared (`scope: shared`) | `<memoryDir>/_shared/` | everyone (verified entries only) |
+
+- A CLI/headless session has no owner: it keeps the old layout and counts as admin.
+- **Moderation.** Anyone can write to the shared layer (the model via `memory_write`
+  with `scope: shared`, or background consolidation), but a non-admin write is always
+  stored as a `candidate`. Candidates never reach the index, recall or any prompt —
+  not even the author's — until an admin approves them. Directive-looking content is
+  stored as `disputed`.
+- **Review.** Admins (the `admins` list) use the `memory_review` tool: `list`, `approve`,
+  `reject`. Approve/reject always pop a human confirmation, so the model cannot endorse
+  its own proposal.
+- Non-admins can change or delete only their own not-yet-approved shared entries;
+  authorship is stamped by the store and cannot be forged. All of this is enforced in
+  the store, not in the tools.
+- Limitation: the web memory panel has no identity yet — it operates on the local
+  (admin) view, so it shows neither per-employee memory nor the shared review queue.
 
 ## How it works (60 seconds)
 

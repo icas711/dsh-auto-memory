@@ -2,23 +2,34 @@
  * Мост к сервису аутентификации хоста (`webAuth` в веб-сборке dsh): единый источник прав админа
  * и личность автора веб-запроса для маршрутов панели.
  *
- * ВАЖНО: форма сервиса `webAuth` здесь НЕ проверена на реальной сборке (в зависимостях плагина
- * её типов нет). Мост написан «по утиной типизации» и в сомнительных случаях закрывается
- * (fail-closed): нет ответа — считаем «неизвестно», а для панели это 403. Уточните точные
- * методы по `webauth.ts` / `web-identity.ts` сборки и поправьте `ADMIN_CHECKS` / `IDENTIFY`.
+ * Личность запроса берётся тем же способом, что и в хосте (`requestIdentity` в web-identity.ts):
+ * `webAuth.identityFromCookie(заголовок cookie)` → `WebIdentity` с полями `login` и `admin`.
+ * Роль из этой личности авторитетна для маршрутов панели.
+ *
+ * НЕ известно (в сборке не видно): есть ли у `webAuth` проверка «логин → админ» без запроса. Для
+ * инструментов памяти (там есть только `session.header.owner`, а не cookie) мост пробует
+ * несколько типичных имён (`isAdmin`, коллекция `admins`); если ничего не нашлось, права админа
+ * решает запасной список `admins` из конфига плагина. Всё сомнительное закрывается (fail-closed).
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 
 type Loose = Record<string, unknown>
 
+/** Личность автора веб-запроса. */
+export interface RequestIdentity {
+  login: string
+  /** Роль по данным хоста (true/false); undefined — хост роль не сообщил. */
+  admin?: boolean
+}
+
 export interface IdentityBridge {
   /** Сервис аутентификации присутствует (многопользовательский веб). Иначе панель работает как раньше (локальный админ). */
   active: () => boolean
   /** true/false — авторитетный ответ хоста; undefined — хост ответить не смог (используется запасной список `admins`). */
   isAdmin: (login: string) => boolean | undefined
-  /** Логин автора запроса; undefined — не удалось определить (панель отвечает 403). */
-  identify: (request: Request) => Promise<string | undefined>
+  /** Автор запроса (логин и роль по данным хоста); undefined — не удалось определить (панель отвечает 403). */
+  identify: (request: Request) => Promise<RequestIdentity | undefined>
 }
 
 function toLogin(value: unknown): string | undefined {
@@ -33,10 +44,9 @@ function toLogin(value: unknown): string | undefined {
   return undefined
 }
 
-/** Имена методов, под которыми сервис может отдавать проверку админа / личность (подправить по сборке). */
+/** Предположительные имена проверки «логин → админ» (в сборке не подтверждены). */
 const ADMIN_METHODS = ['isAdmin', 'isAdminLogin'] as const
 const ADMIN_COLLECTIONS = ['admins', 'adminLogins'] as const
-const IDENTIFY_METHODS = ['identify', 'requestIdentity', 'userFromRequest', 'getRequestUser'] as const
 
 export function createIdentityBridge(ctx: Context): IdentityBridge {
   const service = (): Loose | undefined => {
@@ -70,17 +80,17 @@ export function createIdentityBridge(ctx: Context): IdentityBridge {
       const svc = service()
       if (svc === undefined) return undefined
       try {
-        for (const name of IDENTIFY_METHODS) {
-          const fn = svc[name]
-          if (typeof fn === 'function') {
-            const login = toLogin(await (fn as (r: Request) => unknown).call(svc, request))
-            if (login !== undefined) return login
-          }
-        }
+        const fn = svc.identityFromCookie
+        if (typeof fn !== 'function') return undefined
+        const identity = await (fn as (cookie: string | undefined) => unknown).call(svc, request.headers.get('cookie') ?? undefined)
+        const login = toLogin(identity)
+        if (login === undefined) return undefined // нет живой сессии
+        const admin = (identity as Loose).admin
+        return typeof admin === 'boolean' ? { login, admin } : { login }
       } catch {
         // не смогли определить — fail-closed на стороне вызывающего
+        return undefined
       }
-      return undefined
     },
   }
 }

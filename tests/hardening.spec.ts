@@ -59,19 +59,25 @@ describe('мост identity', () => {
     expect(bridge.isAdmin('a')).toBeUndefined()
     expect(await bridge.identify(new Request('http://x/'))).toBeUndefined()
   })
-  it('утиная типизация: isAdmin(), admins-коллекция, identify()', async () => {
+  it('личность по cookie (identityFromCookie): логин и роль хоста', async () => {
+    const seen: Array<string | undefined> = []
     const bridge = createIdentityBridge(ctxWith({
-      isAdmin: (l: string) => l === 'boss',
-      identify: async () => ({ login: 'boss' }),
+      identityFromCookie: (cookie: string | undefined) => { seen.push(cookie); return cookie === 'sid=1' ? { login: 'boss', admin: true } : undefined },
     }))
     expect(bridge.active()).toBe(true)
+    expect(await bridge.identify(new Request('http://x/', { headers: { cookie: 'sid=1' } }))).toEqual({ login: 'boss', admin: true })
+    expect(await bridge.identify(new Request('http://x/'))).toBeUndefined() // нет сессии
+    expect(seen).toEqual(['sid=1', undefined])
+  })
+  it('проверка «логин → админ»: предположительные имена isAdmin / admins', () => {
+    const bridge = createIdentityBridge(ctxWith({ isAdmin: (l: string) => l === 'boss' }))
     expect(bridge.isAdmin('boss')).toBe(true)
     expect(bridge.isAdmin('x')).toBe(false)
-    expect(await bridge.identify(new Request('http://x/'))).toBe('boss')
     expect(createIdentityBridge(ctxWith({ admins: new Set(['a']) })).isAdmin('a')).toBe(true)
+    expect(createIdentityBridge(ctxWith({})).isAdmin('a')).toBeUndefined() // не знаем → запасной список
   })
   it('сбой сервиса → «не знаю», без исключения', async () => {
-    const bridge = createIdentityBridge(ctxWith({ isAdmin: () => { throw new Error('boom') }, identify: async () => { throw new Error('boom') } }))
+    const bridge = createIdentityBridge(ctxWith({ isAdmin: () => { throw new Error('boom') }, identityFromCookie: () => { throw new Error('boom') } }))
     expect(bridge.isAdmin('a')).toBeUndefined()
     expect(await bridge.identify(new Request('http://x/'))).toBeUndefined()
   })
@@ -86,8 +92,9 @@ describe('гейт маршрутов панели', () => {
     registerMemoryApi(ctx, store, join(root, 'memory-root'), { maxBytes: 4096, homeDir: root }, { maxBytes: 4096 }, identity)
     return (req: Request) => routes.get(`${BASE}/groups.list`)!(req)
   }
-  const bridgeFor = (login: string | undefined): ReturnType<typeof createIdentityBridge> => ({
-    active: () => true, isAdmin: () => undefined, identify: async () => login,
+  const bridgeFor = (login: string | undefined, admin?: boolean): ReturnType<typeof createIdentityBridge> => ({
+    active: () => true, isAdmin: () => undefined,
+    identify: async () => (login === undefined ? undefined : { login, ...(admin !== undefined ? { admin } : {}) }),
   })
 
   it('без webAuth (identity не активен) — как раньше', async () => {
@@ -100,6 +107,9 @@ describe('гейт маршрутов панели', () => {
     expect((await mount(bridgeFor('alice'), store)(new Request('http://x/'))).status).toBe(403)
     expect((await mount(bridgeFor('boss'), store)(new Request('http://x/'))).status).toBe(200)
     expect((await mount(bridgeFor('Boss'), store)(new Request('http://x/'))).status).toBe(403) // регистр значим
+    // роль от хоста авторитетна и в обе стороны
+    expect((await mount(bridgeFor('alice', true), store)(new Request('http://x/'))).status).toBe(200)
+    expect((await mount(bridgeFor('boss', false), store)(new Request('http://x/'))).status).toBe(403)
   })
 })
 

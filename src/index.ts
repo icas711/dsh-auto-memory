@@ -19,6 +19,7 @@ import { registerMemoryTools } from './tools.ts'
 import { MEMORY_SECTION, renderMemoryIndexText } from './prompt.ts'
 import { registerInjectionAudit } from './audit.ts'
 import { registerConsolidation } from './consolidate.ts'
+import { registerRecall } from './recall.ts'
 import { registerMemoryApi } from './memory-api.ts'
 import { loadSettings, applySettings, SETTABLE_FIELDS } from './settings.ts'
 
@@ -43,6 +44,17 @@ export interface Config {
   minImportance: number
   /** P1:软淘汰阈值(天)——超过且从未被读取的记忆在索引重建时从注入索引隐藏(文件保留)。0 禁用。 */
   staleAfterDays: number
+  /** 1.7.0:按需召回——每条用户消息由一次独立 LLM 调用挑出相关记忆并追加到上下文尾部。 */
+  recall: boolean
+  /** 每条用户消息最多召回几条。 */
+  recallMaxMemories: number
+  /** 召回消息的字节预算。 */
+  recallMaxBytes: number
+  /** 选择器调用硬超时(毫秒),超时静默放弃本次召回。 */
+  recallTimeoutMs: number
+  /** 选择器专用 provider/model(须成对设置;留空 = 沿用会话模型)。 */
+  recallProvider?: string
+  recallModel?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -54,6 +66,12 @@ export const Config: z<Config> = z.object({
   autoSummarizeMaxTokens: z.number().default(2048),
   minImportance: z.number().default(4),
   staleAfterDays: z.number().default(0),
+  recall: z.boolean().default(true),
+  recallMaxMemories: z.number().default(4),
+  recallMaxBytes: z.number().default(3000),
+  recallTimeoutMs: z.number().default(6000),
+  recallProvider: z.string(),
+  recallModel: z.string(),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -118,6 +136,9 @@ export function apply(ctx: Context, config: Config): void {
   // 超预算时按相关性截断(词集由 audit 层冻结,KV-safe)
   // 1.4.0 修复(审查 major):传 live 而非冻结 config——设置中心改 maxBytes
   // 后注入预算立即生效(此前传 config 导致设置永不作用于注入路径,重启也不恢复)
+  // 1.7.0:按需召回(agent/pre-step 尾部追加,不动系统提示词 → KV 前缀稳定)
+  const recall = registerRecall(ctx, store, live)
+
   const audit = registerInjectionAudit(store, live, rootDir, consolidation.getQueryText)
   ctx.systemPrompt.section({
     name: MEMORY_SECTION,
@@ -127,5 +148,6 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('session/disposed', session => {
     audit.cleanup(session.id)
     consolidation.cleanup(session.id)
+    recall.cleanup(session.id)
   })
 }

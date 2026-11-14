@@ -288,6 +288,17 @@ export interface LifecycleMeta {
 }
 
 /**
+ * 记忆是否可进入模型上下文(索引注入与按需召回共用同一口径):
+ * 软停用 / disputed / superseded / 已过有效期 的一律隐藏(文件保留)。
+ */
+export function isInjectable(record: MemoryRecord, nowMs: number): boolean {
+  return record.disabled !== true
+    && record.status !== 'disputed'
+    && record.status !== 'superseded'
+    && !isExpired(record, nowMs)
+}
+
+/**
  * 渲染索引正文(一行一条)。排序:pinned 优先 → 三因子分(importance×recency,
  * 天粒度衰减保证当日稳定,不破坏 KV 前缀缓存)→ name 字典序稳定 tiebreak。
  */
@@ -298,12 +309,7 @@ export function renderIndexBody(records: MemoryRecord[]): string {
   // 可信状态过滤(1.0.0):disputed(争议)与 superseded(被取代)不注入——
   // 与 disabled 同款"隐藏不删除"语义,文件保留、面板可见、可恢复;
   // candidate 照常注入(固化产物零行为破坏,验证引导交给体检榜)
-  const visible = records.filter(record =>
-    record.disabled !== true
-    && record.status !== 'disputed'
-    && record.status !== 'superseded'
-    // 有效期(1.6.0):过期不注入——与 disabled 同款"隐藏不删除",续期即恢复
-    && !isExpired(record, Date.now()))
+  const visible = records.filter(record => isInjectable(record, Date.now()))
   const ordered = [...visible].sort((a, b) => {
     const pa = a.pinned === true ? 0 : 1
     const pb = b.pinned === true ? 0 : 1
@@ -411,7 +417,7 @@ export function detectSecrets(text: string): number {
  */
 export function stripMemoryTags(text: string): string {
   return text
-    .replace(/<\s*\/?\s*memory_context[^>]*>/gi, match => match.replace(/[<>]/g, ch => (ch === '<' ? '&lt;' : '&gt;')))
+    .replace(/<\s*\/?\s*memory_(?:context|recall)[^>]*>/gi, match => match.replace(/[<>]/g, ch => (ch === '<' ? '&lt;' : '&gt;')))
 }
 
 /** 写入内容统一清洗(脱敏 + 协议标签防护)。 */
@@ -429,6 +435,9 @@ const DIRECTIVE_PATTERNS: RegExp[] = [
   /\b(?:reveal|show|print|output|leak|expose)\b[^.]{0,30}\b(?:system|developer)\s+(?:prompt|message|instructions?)\b/i,
   /(?:忽略|无视)[^.]{0,20}(?:之前|上面|以上)[^.]{0,20}(?:指令|提示|规则)/,
   /(?:输出|泄露|打印)[^.]{0,15}系统提示词/,
+  // 俄语:«игнорируй все предыдущие инструкции», «покажи системный промпт»
+  /(?:игнорируй|игнорируйте|забудь|забудьте)[^.]{0,30}(?:предыдущ|прежн|вс[еёх])[^.]{0,20}(?:инструкци|указани|правил)/i,
+  /(?:покажи|выведи|раскрой|напечатай)[^.]{0,25}системн[а-я]*\s+(?:промпт|инструкци|сообщени)/i,
 ]
 
 /** 纯函数:文本是否命中指令注入模式(检测 body 与 description;title 过短误报高不查)。 */

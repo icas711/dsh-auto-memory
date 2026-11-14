@@ -301,9 +301,11 @@ export function registerMemoryApi(
   /** Гейт маршрутов панели: null = пропустить, Response = отказ. Fail-closed: личность не определена → 403. */
   const gate = async (request: Request): Promise<Response | null> => {
     if (identity === undefined || !identity.active()) return null
-    const login = await identity.identify(request)
-    if (login === undefined) return forbidden()
-    return store.withOwner(login).isAdmin() ? null : forbidden()
+    const who = await identity.identify(request)
+    if (who === undefined) return forbidden()
+    // Роль от хоста авторитетна; если хост её не сообщил — решает представление хранилища (запасной список admins)
+    const admin = who.admin ?? store.withOwner(who.login).isAdmin()
+    return admin ? null : forbidden()
   }
   const register = (route: Parameters<typeof connection.fetch.register>[0]): ReturnType<typeof connection.fetch.register> =>
     connection.fetch.register({

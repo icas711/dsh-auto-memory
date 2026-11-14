@@ -20,7 +20,7 @@ const input = (name: string, body = `body of ${name}`) => ({ name, description: 
 
 beforeEach(async () => {
   root = await fsp.mkdtemp(join(tmpdir(), 'dsh-mu-'))
-  base = new MemoryStore(root, { admins: ['Boss@dkp'] })
+  base = new MemoryStore(root, { admins: ['boss@dkp'] })
 })
 afterEach(async () => {
   await fsp.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
@@ -71,7 +71,7 @@ describe('общий слой и модерация', () => {
 
   it('админ видит очередь, approve публикует всем, и запись попадает в индекс и инъекцию', async () => {
     const alice = base.withOwner('alice')
-    const admin = base.withOwner('boss@DKP') // регистр не важен
+    const admin = base.withOwner('boss@dkp')
     await alice.write(input('rule-44fz'), 'shared')
     expect((await admin.listPending()).map(r => r.name)).toEqual(['rule-44fz'])
     expect((await admin.approve('rule-44fz'))?.status).toBe('verified')

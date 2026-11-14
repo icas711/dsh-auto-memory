@@ -22,6 +22,8 @@ import { registerConsolidation } from './consolidate.ts'
 import { registerRecall } from './recall.ts'
 import { ownerOf } from './owner.ts'
 import { registerCuration } from './curate.ts'
+import { createIdentityBridge } from './identity.ts'
+import { registerInjectionGate } from './injection-gate.ts'
 import { registerMemoryApi } from './memory-api.ts'
 import { loadSettings, applySettings, SETTABLE_FIELDS } from './settings.ts'
 
@@ -69,6 +71,10 @@ export interface Config {
   curateIntervalHours?: number
   /** Максимум слияний за один проход. */
   curateMaxMerges?: number
+  /** 1.10.0: гейт инъекций — memory_write после чтения внешнего контента идёт через подтверждение человека. */
+  injectionGate?: boolean
+  /** Маски имён инструментов, чтение которых «заражает» ход (пусто = набор по умолчанию). */
+  untrustedTools?: string[]
 }
 
 export const Config: z<Config> = z.object({
@@ -92,6 +98,8 @@ export const Config: z<Config> = z.object({
   curate: z.boolean().default(true),
   curateIntervalHours: z.number().default(24),
   curateMaxMerges: z.number().default(3),
+  injectionGate: z.boolean().default(true),
+  untrustedTools: z.array(z.string()).default([]),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -109,10 +117,14 @@ export function apply(ctx: Context, config: Config): void {
   void loadSettings(rootDir).then(overrides => { Object.assign(live, overrides) })
   // 1.8.0: staleAfterDays/admins передаются функциями, вычисляемыми при чтении, — представления по владельцам, получаемые через withOwner,
   // используют один live-источник (изменения в центре настроек сразу действуют на все представления)
+  // 1.10.0: мост к webAuth хоста — единый источник прав админа (запасной — список admins из конфига)
+  const identity = createIdentityBridge(ctx)
   const store = new MemoryStore(rootDir, {
     staleAfterDays: () => live.staleAfterDays,
     admins: () => live.admins,
+    adminResolver: login => identity.isAdmin(login),
   })
+  const gate = registerInjectionGate(ctx, live)
 
   registerMemoryTools(ctx, store, live)
 
@@ -121,7 +133,7 @@ export function apply(ctx: Context, config: Config): void {
   // 回调使用框架给的 fiber ctx 注册,依赖消失时路由 effect 随作用域自动回收。
   // 1.4.0:传 live 对象——预算/淘汰参数在设置变更后立即反映到面板
   ctx.inject(['connection'], fiberCtx => {
-    registerMemoryApi(fiberCtx, store, rootDir, live as unknown as Parameters<typeof registerMemoryApi>[3], profileDefaults as unknown as Record<string, unknown>)
+    registerMemoryApi(fiberCtx, store, rootDir, live as unknown as Parameters<typeof registerMemoryApi>[3], profileDefaults as unknown as Record<string, unknown>, identity)
   })
 
   // P1:会话结束自动固化(autoSummarize=false 时 no-op);
@@ -174,5 +186,6 @@ export function apply(ctx: Context, config: Config): void {
     consolidation.cleanup(session.id)
     recall.cleanup(session.id)
     curation.cleanup(session.id)
+    gate.cleanup(String(session.id))
   })
 }

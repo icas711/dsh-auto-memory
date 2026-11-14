@@ -30,6 +30,7 @@ import { indexByteBudget } from './prompt.ts'
 import { homedir } from 'node:os'
 import type { MemoryEvidence, MemoryRecord, MemoryScope, MemoryStatus, MemoryType } from './types.ts'
 import { USER_SCOPE_DIR } from './types.ts'
+import type { IdentityBridge } from './identity.ts'
 
 /** 面板条目(浏览器可见的字段子集)。 */
 export interface PanelMemory {
@@ -288,9 +289,31 @@ export function registerMemoryApi(
   // 1.4.0:profile 声明的原始值(live 的回退源)——单字段"重置回 profile
   // 默认"时从这里恢复(config.set 的 null 语义)
   profileDefaults: Record<string, unknown>,
+  // 1.10.0: мост к webAuth хоста. Сервис есть (многопользовательский веб) → маршруты только для админов (иначе 403);
+  // сервиса нет (локальная/одиночная сборка) → поведение прежнее.
+  identity?: IdentityBridge,
 ): void {
   const connection = ctx.get('connection')
   if (connection === undefined) return // 非 web 组合:面板不存在,不注册
+  const forbidden = (): Response => new Response(JSON.stringify({ error: 'forbidden: memory panel is available to admins only' }), {
+    status: 403, headers: { 'content-type': 'application/json' },
+  })
+  /** Гейт маршрутов панели: null = пропустить, Response = отказ. Fail-closed: личность не определена → 403. */
+  const gate = async (request: Request): Promise<Response | null> => {
+    if (identity === undefined || !identity.active()) return null
+    const login = await identity.identify(request)
+    if (login === undefined) return forbidden()
+    return store.withOwner(login).isAdmin() ? null : forbidden()
+  }
+  const register = (route: Parameters<typeof connection.fetch.register>[0]): ReturnType<typeof connection.fetch.register> =>
+    connection.fetch.register({
+      ...route,
+      fetch: (async (request: Request, ...rest: unknown[]) => {
+        const denied = await gate(request)
+        if (denied !== null) return denied
+        return (route.fetch as (r: Request, ...a: unknown[]) => Promise<Response>)(request, ...rest)
+      }) as typeof route.fetch,
+    })
   const home = (config.homeDir as string | undefined) ?? homedir()
   const staleAfterDays = () => (config.staleAfterDays as number | undefined) ?? 0
   // 磁盘覆盖 + profile 默认 → 每字段生效值;顺带同步进 live(GET/Set 后双轨对齐)
@@ -303,7 +326,7 @@ export function registerMemoryApi(
     }
   }
 
-  connection.fetch.register({
+  register({
     path: `${BASE}/config.get`, methods: ['GET'], requestBody: 'buffered',
     fetch: async () => {
       // 设置中心:当前生效值 + 每字段来源(profile 声明 vs 用户覆盖)。
@@ -323,7 +346,7 @@ export function registerMemoryApi(
     },
   })
 
-  connection.fetch.register({
+  register({
     path: `${BASE}/config.set`, methods: ['POST'], requestBody: 'buffered',
     fetch: async (request) => {
       try {
@@ -373,7 +396,7 @@ export function registerMemoryApi(
       headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
     }))
 
-  connection.fetch.register({
+  register({
     path: `${BASE}/groups.list`, methods: ['GET'], requestBody: 'buffered',
     fetch: async (request) => {
       const cwd = new URL(request.url).searchParams.get('cwd') ?? undefined
@@ -390,7 +413,7 @@ export function registerMemoryApi(
     },
   })
 
-  connection.fetch.register({
+  register({
     path: `${BASE}/memory.read`, methods: ['GET'], requestBody: 'buffered',
     fetch: async (request) => {
       const url = new URL(request.url)
@@ -408,7 +431,7 @@ export function registerMemoryApi(
     },
   })
 
-  connection.fetch.register({
+  register({
     path: `${BASE}/memory.write`, methods: ['POST'], requestBody: 'buffered',
     fetch: async (request) => {
       try {
@@ -461,7 +484,7 @@ export function registerMemoryApi(
     },
   })
 
-  connection.fetch.register({
+  register({
     path: `${BASE}/import.claude.scan`, methods: ['GET'], requestBody: 'buffered',
     fetch: async () => {
       // 只读扫描:遍历 ~/.claude/projects/*/memory,返回逐项目/逐条预览(目标层、
@@ -492,7 +515,7 @@ export function registerMemoryApi(
     },
   })
 
-  connection.fetch.register({
+  register({
     path: `${BASE}/import.claude.apply`, methods: ['POST'], requestBody: 'buffered',
     fetch: async (request) => {
       try {
@@ -524,7 +547,7 @@ export function registerMemoryApi(
     },
   })
 
-  connection.fetch.register({
+  register({
     path: `${BASE}/audit.stats`, methods: ['GET'], requestBody: 'buffered',
     fetch: async () => {
       // 注入审计统计(0.9.0):读 audit.jsonl 聚合,坏行已在读取层跳过;
@@ -534,7 +557,7 @@ export function registerMemoryApi(
     },
   })
 
-  connection.fetch.register({
+  register({
     path: `${BASE}/health.report`, methods: ['GET'], requestBody: 'buffered',
     fetch: async () => {
       // 记忆体检(1.0.0 可信记忆):待验证/僵尸/矛盾三榜,聚合实现在
@@ -544,7 +567,7 @@ export function registerMemoryApi(
     },
   })
 
-  connection.fetch.register({
+  register({
     path: `${BASE}/export.agents`, methods: ['GET'], requestBody: 'buffered',
     fetch: async (request) => {
       // 反向导出桥(1.2.0):信任态记忆 → AGENTS.md 片段(纯文本,复制即用)。
@@ -563,7 +586,7 @@ export function registerMemoryApi(
     },
   })
 
-  connection.fetch.register({
+  register({
     path: `${BASE}/memory.delete`, methods: ['POST'], requestBody: 'buffered',
     fetch: async (request) => {
       try {

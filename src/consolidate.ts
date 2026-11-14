@@ -332,6 +332,8 @@ interface SessionCapture {
   pending: string[]
   /** Число новых настоящих пользовательских сообщений в pending (счётчик порога запуска). */
   pendingUsers: number
+  /** Последний агент сессии: нужен, чтобы дозафиксировать хвост на session/disposed (там агента уже нет). */
+  lastAgent?: AgentLike
   /** В этой сессии уже идёт консолидация (в одной сессии не параллелим, новое содержимое остаётся в pending до следующего раза). */
   busy: boolean
 }
@@ -586,6 +588,7 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
   ctx.on('agent/turn-stopping', ({ agent }) => {
     if (!options.autoSummarize) return
     const cap = captures.get(agent.session.id)
+    if (cap !== undefined) cap.lastAgent = agent as unknown as AgentLike
     if (cap === undefined || cap.busy || cap.pendingUsers < everyTurns()) return
     startConsolidation(agent, cap)
   })
@@ -603,8 +606,13 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
   })
 
   // 会话离开 live store 时兜底清理缓冲(agent/disposed 未覆盖的关闭路径)
+  // Штатное закрытие сессии: дозафиксировать хвост (если агент ещё не освобождён и есть непросчитанные
+  // пользовательские сообщения), затем убрать буфер. Аварийное завершение процесса хвост всё равно теряет.
   ctx.on('session/disposed', session => {
+    const cap = captures.get(session.id)
     captures.delete(session.id)
+    if (cap === undefined || !options.autoSummarize || cap.busy || cap.lastAgent === undefined) return
+    startConsolidation(cap.lastAgent, cap)
   })
 
   // teardown:先中止在途 LLM 调用,再排空(emit 监听不被 await,优雅退出靠这里兜底)

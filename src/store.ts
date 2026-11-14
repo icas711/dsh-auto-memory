@@ -303,9 +303,13 @@ export function isInjectable(record: MemoryRecord, nowMs: number): boolean {
     && !isExpired(record, nowMs)
 }
 
-/** Нормализация логина (без пробелов, нижний регистр): для сравнения owner со списком admins. */
+/**
+ * Нормализация логина для сравнения со списком admins: только обрезка пробелов, БЕЗ приведения регистра.
+ * Так же сравнивает web-auth хоста: `Alice` и `alice` — разные пользователи, и права админа одного
+ * не должны переходить к другому. Логины в нижнем регистре обеспечивает сторона хоста (seed/provision).
+ */
 function normalizeOwner(owner: string): string {
-  return owner.trim().toLowerCase()
+  return owner.trim()
 }
 
 /**
@@ -516,10 +520,17 @@ export interface MemoryWriteInput extends Omit<MemoryRecord, 'scope' | 'origin'>
 export interface MemoryStoreOptions {
   /** Число или функция, вычисляемая при чтении (горячее переключение из центра настроек: представления используют один live-источник). */
   staleAfterDays?: number | (() => number)
-  /** Администраторы общего слоя (логины, без учёта регистра). Локальная/CLI-сессия (без owner) всегда админ. */
+  /** Администраторы общего слоя (логины, регистр значим — как в web-auth). Локальная/CLI-сессия (без owner) всегда админ. */
   admins?: readonly string[] | (() => readonly string[])
   /** Внутреннее: пользователь, которому принадлежит представление; используйте withOwner(). */
   owner?: string
+  /**
+   * Внешний источник прав админа (мост к webAuth хоста): true/false — авторитетный ответ,
+   * undefined — «не знаю», тогда решает список `admins` (запасной).
+   */
+  adminResolver?: (owner: string) => boolean | undefined
+  /** Внутреннее: общий слой только на чтение (делегированные сессии без owner — не админы). */
+  sharedReadOnly?: boolean
 }
 
 export class MemoryStore {
@@ -528,6 +539,8 @@ export class MemoryStore {
     this.staleSource = options?.staleAfterDays ?? 0
     this.adminSource = options?.admins ?? []
     this.owner = options?.owner
+    this.adminResolver = options?.adminResolver
+    this.sharedReadOnly = options?.sharedReadOnly === true
     const key = ownerDirKey(this.owner)
     this.personalRoot = key === undefined ? rootDir : join(rootDir, OWNERS_DIR, key)
   }
@@ -544,6 +557,9 @@ export class MemoryStore {
   }
   /** Пользователь этого представления; undefined = локально/CLI. */
   readonly owner: string | undefined
+  private readonly adminResolver: ((owner: string) => boolean | undefined) | undefined
+  /** Общий слой только на чтение (делегированная сессия без owner). */
+  private readonly sharedReadOnly: boolean
 
   /**
    * Представление хранилища для пользователя (многопользовательский режим, 1.8.0): личные слои (user/project) лежат в его собственном корне,
@@ -555,15 +571,35 @@ export class MemoryStore {
     return new MemoryStore(this.baseRoot, {
       staleAfterDays: this.staleSource,
       admins: this.adminSource,
+      ...(this.adminResolver !== undefined ? { adminResolver: this.adminResolver } : {}),
       ...(owner !== undefined ? { owner } : {}),
+    })
+  }
+
+  /**
+   * Представление для делегированной (fork-дочерней) сессии без owner: в веб-сборке такие сессии
+   * тоже имеют owner === undefined, и без этой защиты они считались бы локальным админом общего слоя.
+   * Личные слои — как у локального представления, общий слой — только чтение, админом не является.
+   */
+  delegated(): MemoryStore {
+    return new MemoryStore(this.baseRoot, {
+      staleAfterDays: this.staleSource,
+      admins: this.adminSource,
+      ...(this.adminResolver !== undefined ? { adminResolver: this.adminResolver } : {}),
+      ...(this.owner !== undefined ? { owner: this.owner } : {}),
+      sharedReadOnly: true,
     })
   }
 
   /** Админ ли общего слоя: локально/CLI (без owner) — всегда да; пользователь с логином должен быть в списке admins. */
   isAdmin(): boolean {
+    if (this.sharedReadOnly) return false
     if (this.owner === undefined) return true
-    const list = typeof this.adminSource === 'function' ? this.adminSource() : this.adminSource
     const me = normalizeOwner(this.owner)
+    // Хост (webAuth) — единый источник прав, если ответил; иначе запасной список admins из конфига
+    const external = this.adminResolver?.(me)
+    if (external !== undefined) return external
+    const list = typeof this.adminSource === 'function' ? this.adminSource() : this.adminSource
     return list.some(admin => normalizeOwner(admin) === me)
   }
 
@@ -575,6 +611,7 @@ export class MemoryStore {
 
   /** Права на изменение/удаление в общем слое: админ — любые; остальные — только свои ещё не одобренные записи (кандидат/спорная). */
   private mayModifyShared(record: MemoryRecord): boolean {
+    if (this.sharedReadOnly) return false
     if (this.isAdmin()) return true
     return record.author !== undefined
       && record.author === this.owner
@@ -699,6 +736,7 @@ export class MemoryStore {
       // 注入)——superseded 只能经用户面板 restore 离开
       if (record.onlyIfAbsent === true && existing !== null) return
       // Права общего слоя (единая точка, вызывающий код обойти не может): не-админ может только создавать или менять свои ещё не одобренные записи
+      if (scope === 'shared' && this.sharedReadOnly) throw new Error('shared memory is read-only in delegated sessions')
       const sharedNonAdmin = scope === 'shared' && !this.isAdmin()
       if (sharedNonAdmin && existing !== null && !this.mayModifyShared(existing)) {
         throw new Error(`shared memory "${record.name}" can only be changed by an admin (it is verified or belongs to another user)`)

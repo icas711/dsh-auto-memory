@@ -300,6 +300,8 @@ and where the defaults the runtime layer falls back to come from:
     recallProvider: ''           # selector provider/model, set both to use a cheaper model;
     recallModel: ''              # empty = the session's own model
     staleAfterDays: 0            # >0: soft-hide zero-read memories older than N days (files kept)
+    injectionGate: true          # memory_write after reading documents/web requires human confirmation
+    untrustedTools: []           # tool-name masks that taint a turn (empty = built-in defaults)
     curate: true                 # background cleanup: merge duplicate memories (see "Background cleanup")
     curateIntervalHours: 24      # at most once per N hours per layer
     curateMaxMerges: 3           # merges per pass
@@ -353,7 +355,7 @@ into authenticated web sessions:
 
 ## Ограничения (Limitations)
 
-Известные ограничения версий 1.7.0–1.9.0 — на русском, с чек-листом проверки на стенде:
+Известные ограничения версий 1.7.0–1.10.0 — на русском, с чек-листом проверки на стенде:
 [docs/LIMITATIONS.ru.md](docs/LIMITATIONS.ru.md). Главное: плагин не проверен на живом dsh
 (только автотесты со стабами); веб-панель не знает личность пользователя; личность берётся из
 `session.header.owner` — без него сессия считается локальной и получает права админа.

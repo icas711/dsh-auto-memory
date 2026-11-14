@@ -19,7 +19,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { MemoryPage } from './MemoryPage.tsx'
 import { MemoryPanelIcon } from './MemoryPanelIcon.tsx'
-import { en, zh, type PluginMemoryLocaleKey } from './locales.ts'
+import { ru, type PluginMemoryLocaleKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -558,7 +558,9 @@ function injectPanelCss(): void {
 
 /** 注册侧栏入口与记忆管理面板。 */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-auto-memory: dictionaries')
+  // В сборке-приёмнике локаль плоская и только русская (языкового измерения нет): регистрируем словарь как есть.
+  // Приведение типа — потому что объявление установленных зависимостей ждёт пару { zh, en }.
+  ctx.effect(() => ctx.locale.register(NS, ru as never), 'dsh-auto-memory: dictionaries')
   // 样式注入(参照官方 client bundle 的 data-plugin-css 约定,幂等)——
   // 内联 style 没有 hover/focus/line-clamp 能力,0.9.1 起面板视觉层走真 CSS 类
   injectPanelCss()
@@ -566,6 +568,22 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('main', () => ctx.slots.register({
     name: 'main',
     key: PANEL_ID,
+    locale: NS,
+    inject: () => memoryFace(ctx),
+  }, MemoryPage))
+  // Сборка-приёмник не имеет слотов main / sidebar.panellist (регистрации выше там безвредны) — панель
+  // монтируется как раздел Настроек. Имя слота и форма регистрации (id, order, label) — по прецеденту
+  // dsh-ppt в целевой сборке; в установленных типах слота нет, поэтому приведение через unknown.
+  // Раздел Настроек виден каждому вошедшему, а маршруты панели — только админам (403 остальным, см. memory-api).
+  const slots = ctx.slots as unknown as {
+    inject: (name: string, factory: () => unknown) => unknown
+    register: (descriptor: Record<string, unknown>, component: unknown) => unknown
+  }
+  slots.inject('settings.section', () => slots.register({
+    name: 'settings.section',
+    id: PANEL_ID,
+    order: 50,
+    label: () => t('panel'),
     locale: NS,
     inject: () => memoryFace(ctx),
   }, MemoryPage))

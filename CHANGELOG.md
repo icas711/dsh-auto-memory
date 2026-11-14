@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 the [GitHub Releases](https://github.com/AskTheWay/dsh-auto-memory/releases)
 page (generated from this file at publish time).
 
+## [1.10.0] - 2026-11-15
+
+Hardening for the multi-user web build (replacing the built-in memory).
+
+### Added
+- Panel routes are admin-only when the host has a `webAuth` service (403 otherwise; fail-closed).
+- Admin bridge to `webAuth` (single source of truth; `admins` in config is the fallback).
+- Injection gate: `memory_write` after the turn read untrusted content (`untrustedTools`) asks a human.
+- `bypassPolicy: true` on every `ask` (delete-all, prune, review, gate).
+- Panel mounted as a Settings section (`settings.section`); Russian-only dictionary.
+- Tail of the consolidation buffer is flushed on `session/disposed`.
+
+### Changed
+- `admins` are compared exactly (case-sensitive), like web-auth.
+- Delegated sessions without `owner` are no longer local admins: shared layer is read-only for them.
+
 ## [Unreleased]
 
 ### Documentation

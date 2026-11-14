@@ -16,6 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore } from './store.ts'
 import { ownerOf } from './owner.ts'
+import { askHuman } from './ask.ts'
 import { normalizeName, memoryScore, DEFAULT_IMPORTANCE, detectSecrets, isExpired } from './store.ts'
 import { descriptionCoverage } from './matching.ts'
 import { expandLinks } from './links.ts'
@@ -41,6 +42,17 @@ export function registerMemoryTools(
     'project' as const,
     ...(config.enableSharedScope !== false ? ['shared' as const] : []),
   ]
+
+  /**
+   * Представление хранилища для сессии. Делегированные сессии без owner (fork-дети в веб-сборке) получают
+   * общий слой только на чтение и права админа не имеют — иначе owner === undefined делал бы их локальными админами.
+   */
+  const viewFor = (agent: { session: { header: unknown } } | undefined | null): MemoryStore => {
+    const owner = ownerOf(agent)
+    const view = baseStore.withOwner(owner)
+    const depth = (agent?.session.header as { delegationDepth?: number } | undefined)?.delegationDepth ?? 0
+    return owner === undefined && depth > 0 ? view.delegated() : view
+  }
 
   const guardScope = (scope: MemoryScope): MemoryScope => {
     if (scope === 'user' && !config.enableUserScope) {
@@ -120,7 +132,7 @@ export function registerMemoryTools(
       render: (_args, value) => [{ type: 'text', text: `Memory ${value.operation}: ${value.name} (${value.scope}${value.pinned ? ', pinned' : ''})${value.pendingReview === true ? ' — saved as a CANDIDATE: hidden from colleagues until an admin approves it' : ''}${(value.redacted ?? 0) > 0 ? ` — ⚠ ${String(value.redacted)} secret(s) detected and redacted; do not store credentials in memories` : ''}` }],
     },
     async execute(args, exec) {
-      const store = baseStore.withOwner(ownerOf(exec.agent))
+      const store = viewFor(exec.agent)
       const cwd = requireCwd(exec.agent?.session.header.cwd)
       const name = normalizeName(args.name)
       // 未显式指定 scope:先在可访问层内查重,命中层即更新层;未命中落到 project
@@ -210,7 +222,7 @@ export function registerMemoryTools(
       },
     },
     async execute(args, exec) {
-      const store = baseStore.withOwner(ownerOf(exec.agent))
+      const store = viewFor(exec.agent)
       const cwd = exec.agent?.session.header.cwd
       const record = await (async () => {
         const explicit = parseExplicitScope(args.scope)
@@ -269,7 +281,7 @@ export function registerMemoryTools(
       }],
     },
     async execute(args, exec) {
-      const store = baseStore.withOwner(ownerOf(exec.agent))
+      const store = viewFor(exec.agent)
       const cwd = exec.agent?.session.header.cwd
       const explicit = parseExplicitScope(args.scope)
       const scopes: readonly MemoryScope[] = explicit !== undefined
@@ -334,7 +346,7 @@ export function registerMemoryTools(
       }],
     },
     async execute(args, exec) {
-      const store = baseStore.withOwner(ownerOf(exec.agent))
+      const store = viewFor(exec.agent)
       const cwd = exec.agent?.session.header.cwd
       const query = String(args.query ?? '').trim()
       if (query.length === 0) throw new Error('query must be a non-empty string')
@@ -389,7 +401,7 @@ export function registerMemoryTools(
       render: (_args, value) => [{ type: 'text', text: `Deleted memory: ${value.name} (${value.scope})` }],
     },
     async execute(args, exec) {
-      const store = baseStore.withOwner(ownerOf(exec.agent))
+      const store = viewFor(exec.agent)
       const cwd = exec.agent?.session.header.cwd
       const name = normalizeName(args.name)
       const explicit = parseExplicitScope(args.scope)
@@ -446,7 +458,7 @@ export function registerMemoryTools(
       },
     },
     async execute(args, exec) {
-      const store = baseStore.withOwner(ownerOf(exec.agent))
+      const store = viewFor(exec.agent)
       // 下限校验(审查 minor 修复):0/负数会匹配全部有元数据记忆,等于绕过确认的批量删除
       if (!Number.isSafeInteger(args.olderThanDays) || args.olderThanDays < 1) {
         throw new Error('olderThanDays must be an integer >= 1')
@@ -520,7 +532,7 @@ export function registerMemoryTools(
       }],
     },
     async execute(args, exec) {
-      const store = baseStore.withOwner(ownerOf(exec.agent))
+      const store = viewFor(exec.agent)
       if (args.confirm !== true) throw new Error('memory_delete_all requires confirm=true (destructive); ask the user first')
       const cwd = exec.agent?.session.header.cwd
       const explicit = parseExplicitScope(args.scope)
@@ -584,7 +596,7 @@ export function registerMemoryTools(
       },
     },
     async execute(args, exec) {
-      const store = baseStore.withOwner(ownerOf(exec.agent))
+      const store = viewFor(exec.agent)
       if (config.enableSharedScope === false) throw new Error('shared scope is disabled by configuration (enableSharedScope: false)')
       if (!store.isAdmin()) throw new Error('memory_review is available to admins only')
       if (args.action === 'list') {
@@ -610,18 +622,19 @@ export function registerMemoryTools(
     const decision = await next()
     if (decision.kind !== 'allow') return decision
     if (exec.name === 'memory_delete_all') {
-      return { kind: 'ask', reason: 'memory_delete_all permanently deletes every memory in scope' }
+      // bypassPolicy: при политике подтверждений 'never' запрос иначе отклонялся бы молча и защита отключалась
+      return askHuman('memory_delete_all permanently deletes every memory in scope')
     }
     // Модерация общего слоя: одобрение/отклонение самой моделью не считается — админ должен лично подтвердить в окне подтверждения,
     // иначе сессия, в которую внедрили инструкции, могла бы сама себя одобрить и протолкнуть вредоносную запись всем
     if (exec.name === 'memory_review') {
       const action = (exec.arguments as { action?: string } | null)?.action
       if (action === 'approve' || action === 'reject') {
-        return { kind: 'ask', reason: `memory_review ${action}: changes the team-wide shared memory visible to every employee` }
+        return askHuman(`memory_review ${action}: changes the team-wide shared memory visible to every employee`)
       }
     }
     if (exec.name === 'memory_prune' && (exec.arguments as { dryRun?: boolean } | null)?.dryRun === false) {
-      return { kind: 'ask', reason: 'memory_prune (dryRun=false) permanently deletes matching memories' }
+      return askHuman('memory_prune (dryRun=false) permanently deletes matching memories')
     }
     return decision
   })

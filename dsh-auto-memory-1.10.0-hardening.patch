@@ -1,0 +1,1294 @@
+From 21161b7854c017eb7b6cf93b2db652312d39ee5b Mon Sep 17 00:00:00 2001
+From: icas <coi-79@mail.ru>
+Date: Sat, 14 Nov 2026 22:01:29 +0000
+Subject: [PATCH] =?UTF-8?q?feat:=20hardening=20for=20multi-user=20web=20bu?=
+ =?UTF-8?q?ild=20=E2=80=94=20admin-only=20panel,=20webAuth=20bridge,=20inj?=
+ =?UTF-8?q?ection=20gate,=20ru=20panel=20(1.10.0)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ CHANGELOG.md            |  16 ++++
+ README.md               |   4 +-
+ docs/LIMITATIONS.ru.md  |  48 +++++++---
+ package.json            |   2 +-
+ src/ask.ts              |  10 +++
+ src/client/index.ts     |  22 ++++-
+ src/client/locales.ts   | 195 ++++++++++++++++++++++++++++++++++++++++
+ src/consolidate.ts      |   8 ++
+ src/identity.ts         |  86 ++++++++++++++++++
+ src/index.ts            |  15 +++-
+ src/injection-gate.ts   |  73 +++++++++++++++
+ src/memory-api.ts       |  45 +++++++---
+ src/store.ts            |  46 +++++++++-
+ src/tools.ts            |  35 +++++---
+ tests/hardening.spec.ts | 167 ++++++++++++++++++++++++++++++++++
+ tests/multiuser.spec.ts |   4 +-
+ 16 files changed, 730 insertions(+), 46 deletions(-)
+ create mode 100644 src/ask.ts
+ create mode 100644 src/identity.ts
+ create mode 100644 src/injection-gate.ts
+ create mode 100644 tests/hardening.spec.ts
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 0831f29..15cb03c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
+ the [GitHub Releases](https://github.com/AskTheWay/dsh-auto-memory/releases)
+ page (generated from this file at publish time).
+ 
++## [1.10.0] - 2026-11-15
++
++Hardening for the multi-user web build (replacing the built-in memory).
++
++### Added
++- Panel routes are admin-only when the host has a `webAuth` service (403 otherwise; fail-closed).
++- Admin bridge to `webAuth` (single source of truth; `admins` in config is the fallback).
++- Injection gate: `memory_write` after the turn read untrusted content (`untrustedTools`) asks a human.
++- `bypassPolicy: true` on every `ask` (delete-all, prune, review, gate).
++- Panel mounted as a Settings section (`settings.section`); Russian-only dictionary.
++- Tail of the consolidation buffer is flushed on `session/disposed`.
++
++### Changed
++- `admins` are compared exactly (case-sensitive), like web-auth.
++- Delegated sessions without `owner` are no longer local admins: shared layer is read-only for them.
++
+ ## [Unreleased]
+ 
+ ### Documentation
+diff --git a/README.md b/README.md
+index 7383a47..f16a560 100644
+--- a/README.md
++++ b/README.md
+@@ -300,6 +300,8 @@ and where the defaults the runtime layer falls back to come from:
+     recallProvider: ''           # selector provider/model, set both to use a cheaper model;
+     recallModel: ''              # empty = the session's own model
+     staleAfterDays: 0            # >0: soft-hide zero-read memories older than N days (files kept)
++    injectionGate: true          # memory_write after reading documents/web requires human confirmation
++    untrustedTools: []           # tool-name masks that taint a turn (empty = built-in defaults)
+     curate: true                 # background cleanup: merge duplicate memories (see "Background cleanup")
+     curateIntervalHours: 24      # at most once per N hours per layer
+     curateMaxMerges: 3           # merges per pass
+@@ -353,7 +355,7 @@ into authenticated web sessions:
+ 
+ ## Ограничения (Limitations)
+ 
+-Известные ограничения версий 1.7.0–1.9.0 — на русском, с чек-листом проверки на стенде:
++Известные ограничения версий 1.7.0–1.10.0 — на русском, с чек-листом проверки на стенде:
+ [docs/LIMITATIONS.ru.md](docs/LIMITATIONS.ru.md). Главное: плагин не проверен на живом dsh
+ (только автотесты со стабами); веб-панель не знает личность пользователя; личность берётся из
+ `session.header.owner` — без него сессия считается локальной и получает права админа.
+diff --git a/docs/LIMITATIONS.ru.md b/docs/LIMITATIONS.ru.md
+index 5e6f10f..69265fb 100644
+--- a/docs/LIMITATIONS.ru.md
++++ b/docs/LIMITATIONS.ru.md
+@@ -1,4 +1,4 @@
+-# Известные ограничения (версии 1.7.0–1.9.0)
++# Известные ограничения (версии 1.7.0–1.10.0)
+ 
+ Документ для тех, кто разворачивает плагин для нескольких сотрудников. Здесь собрано то, что
+ плагин **не** гарантирует, и то, что пока не проверено на реальном стенде. Если пункт
+@@ -22,17 +22,27 @@
+   записал `owner` (или записал пустую строку), сессия считается **локальной: она попадает в
+   старый каталог и получает права админа общего слоя**. Плагин не может это обнаружить.
+   Требование к деплою: авторизованный вход всегда пишет `owner`.
+-- **Регистр логина.** Список `admins` сравнивается без учёта регистра, а каталог личной памяти
+-  строится от логина «как есть». `Alice` и `alice` — разные каталоги с разной памятью, но
+-  одинаковые права админа. Нормализуйте логины на стороне dsh.
++- **Регистр логина (с 1.10.0).** Список `admins` сравнивается **точно**, как и в web-auth:
++  `Alice` и `alice` — разные пользователи с разными каталогами памяти и разными правами. Чтобы
++  не плодить двойников, веб-вход должен принимать только логины в нижнем регистре (seed/provision).
+ - **Изоляция логическая, не файловая.** Личные слои разведены по каталогам `_owners/<ключ>/`,
+   но файлы лежат открытым текстом. Любой, у кого есть доступ к диску сервера или резервной копии,
+   читает всё. Шифрования нет. Ключ каталога — хеш логина (по нему обратно логин не восстановить,
+   но и подписи каталога «чей он» нет).
+-- **Список `admins` меняется только в конфиге** (профиль `cordis.patch.yml`), и намеренно
+-  не доступен через панель настроек: иначе любой пользователь панели мог бы назначить себя админом.
+-- **Одобрение требует человека.** `memory_review` (approve/reject) всегда возвращает `ask`. Если
+-  в сборке dsh нет сервиса подтверждений, `ask` трактуется как отказ — тогда ревью общего слоя
++- **Источник прав админа (с 1.10.0).** Если в сборке есть сервис `webAuth`, он единственный источник
++  истины (`DSH_WEB_ADMINS`); список `admins` из конфига — запасной на случай, когда хост ответить не
++  смог или сервиса нет. `admins` меняется только в конфиге (профиль) и намеренно не доступен через
++  панель настроек: иначе любой пользователь панели мог бы назначить себя админом.
++  **Форма сервиса `webAuth` в плагине не проверена на реальной сборке:** мост (`src/identity.ts`)
++  написан по утиной типизации и закрывается при сомнениях. Сверьте методы с `webauth.ts` и
++  `web-identity.ts` сборки.
++- **Делегированные сессии (с 1.10.0).** Fork-дети и fleet-члены в веб-сборке тоже имеют
++  `owner === undefined`. Такая сессия **не** считается локальным админом: общий слой для неё только
++  на чтение, `memory_review` недоступен. Личные слои она по-прежнему видит как локальное представление.
++- **Одобрение требует человека.** `memory_review` (approve/reject), `memory_delete_all`, удаление
++  через `memory_prune` и `memory_write` после чтения внешнего контента возвращают `ask` с
++  `bypassPolicy: true` (с 1.10.0): политика подтверждений `'never'` их молча не отклонит. Если в
++  сборке нет сервиса подтверждений, `ask` трактуется как отказ — тогда ревью общего слоя
+   **невозможно**, пока подтверждения не появятся.
+ - У админа нет сравнения «было → стало» при одобрении: он видит только итоговый текст записи.
+   Администратор отвечает за то, чтобы прочитать тело целиком.
+@@ -41,12 +51,17 @@
+ 
+ ## 3. Веб-панель
+ 
+-- Панель (`memory-api.ts`) не знает, кто пользователь: она работает с **локальным представлением**
++- **Доступ (с 1.10.0).** Если в сборке есть `webAuth`, все маршруты `/api/auto-memory/*` отвечают
++  только админам; остальным и тем, чью личность определить не удалось, — 403. Без `webAuth`
++  (локальная сборка) поведение прежнее.
++- Панель по-прежнему не знает, **чьи** слои показывать: она работает с **локальным представлением**
+   (старый каталог, права админа). Она не показывает личную память сотрудников, не показывает очередь
+   на одобрение общего слоя и не умеет approve/reject — только инструмент `memory_review` в чате.
++- Панель монтируется как раздел Настроек (`settings.section`); имя слота и форма регистрации взяты
++  по описанию сборки и **не проверены** на ней. Словарь панели — только русский.
+ - Статистика внедрений (аудит) не различает слои «общий»: такие записи в списке будут как «удалена».
+-- Всё, что панель показывает и правит, относится к локальной сессии. Давать доступ к панели
+-  обычным сотрудникам до появления идентичности в панели нельзя.
++- Всё, что панель показывает и правит, относится к локальному представлению. Поэтому доступ
++  админам-только (см. выше) — это не временная мера, а условие, пока панель не знает идентичность.
+ 
+ ## 4. Миграция
+ 
+@@ -87,11 +102,18 @@
+ 
+ - Запускается каждые `autoSummarizeEveryTurns` (3) сообщений пользователя на границе хода. Хвост
+   короче порога фиксируется только на `agent/disposed` — при аварийном завершении процесса он теряется.
+-- События закрытия сессии в dsh нет, поэтому длинные веб-сессии зависят целиком от порога.
++- Штатное закрытие сессии (`session/disposed`, с 1.10.0) дозаписывает хвост, если агент ещё доступен.
++  Для долгих веб-сессий основная опора по-прежнему порог.
+ - Каждая фиксация — платный вызов LLM. При сбое пакет возвращается в буфер без сброса счётчика
+   (это естественный откат: повтор только на следующем пороге, а не на каждом ходу).
+ - Модель-фиксатор ошибается: записи получают статус `candidate`, а не `verified`. Но кандидат
+-  в личных слоях **попадает в промпт** (в отличие от общего слоя).
++  в личных слоях **попадает в промпт** (в отличие от общего слоя) без подтверждения человеком —
++  осознанное решение (как у Claude Code).
++- **Гейт против инъекций (с 1.10.0).** Если в ходе читались документы/веб (инструменты из
++  `untrustedTools`; по умолчанию набор типичных масок), `memory_write` в этом ходу идёт через
++  подтверждение. Реальные имена инструментов чтения в вашей сборке надо задать в конфиге. На
++  фоновую фиксацию гейт **не** распространяется: она работает по тексту разговора и защищена только
++  статусом `candidate` и сканером директив.
+ - **Конфиденциальность.** Расшифровка разговора и содержимое памяти уходят провайдеру LLM, которым
+   вы пользуетесь. При облачном провайдере это персональные и служебные данные ДКП. Пока нет
+   локальных H200, оцените, что можно отправлять в облако; для recall и уборки можно задать
+diff --git a/package.json b/package.json
+index b36dc64..31fff34 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "dsh-auto-memory",
+-  "version": "1.9.0",
++  "version": "1.10.0",
+   "description": "Auditable memory for DeepSeek Harness: 4-state trust machine + verbatim evidence chains + recall funnel + 4-layer evals. Plain Markdown, zero servers, zero embeddings.",
+   "type": "module",
+   "license": "MIT",
+diff --git a/src/ask.ts b/src/ask.ts
+new file mode 100644
+index 0000000..357f6d7
+--- /dev/null
++++ b/src/ask.ts
+@@ -0,0 +1,10 @@
++/**
++ * Решение `ask` (подтверждение человеком) с `bypassPolicy: true`.
++ *
++ * В сборке хоста политика подтверждений `'never'` без `bypassPolicy` молча отклоняет запрос — и защитные
++ * подтверждения (удаление, модерация общего слоя, гейт инъекций) тихо перестали бы работать. Поле есть
++ * в решении `ask` целевой сборки, но не в типах установленных зависимостей плагина — отсюда приведение типа.
++ */
++export function askHuman(reason: string): { kind: 'ask', reason: string } {
++  return { kind: 'ask', reason, bypassPolicy: true } as unknown as { kind: 'ask', reason: string }
++}
+diff --git a/src/client/index.ts b/src/client/index.ts
+index 5c0bda8..9b01bdf 100644
+--- a/src/client/index.ts
++++ b/src/client/index.ts
+@@ -19,7 +19,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+ import { MemoryPage } from './MemoryPage.tsx'
+ import { MemoryPanelIcon } from './MemoryPanelIcon.tsx'
+-import { en, zh, type PluginMemoryLocaleKey } from './locales.ts'
++import { ru, type PluginMemoryLocaleKey } from './locales.ts'
+ 
+ declare module '@deepseek-ai/dsh-client-ui-slots' {
+   interface LocaleNamespaceMap {
+@@ -558,7 +558,9 @@ function injectPanelCss(): void {
+ 
+ /** 注册侧栏入口与记忆管理面板。 */
+ export function apply(ctx: ClientContext): void {
+-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-auto-memory: dictionaries')
++  // В сборке-приёмнике локаль плоская и только русская (языкового измерения нет): регистрируем словарь как есть.
++  // Приведение типа — потому что объявление установленных зависимостей ждёт пару { zh, en }.
++  ctx.effect(() => ctx.locale.register(NS, ru as never), 'dsh-auto-memory: dictionaries')
+   // 样式注入(参照官方 client bundle 的 data-plugin-css 约定,幂等)——
+   // 内联 style 没有 hover/focus/line-clamp 能力,0.9.1 起面板视觉层走真 CSS 类
+   injectPanelCss()
+@@ -569,6 +571,22 @@ export function apply(ctx: ClientContext): void {
+     locale: NS,
+     inject: () => memoryFace(ctx),
+   }, MemoryPage))
++  // Сборка-приёмник не имеет слотов main / sidebar.panellist (регистрации выше там безвредны) — панель
++  // монтируется как раздел Настроек. Имя слота и форма регистрации (id, order, label) — по прецеденту
++  // dsh-ppt в целевой сборке; в установленных типах слота нет, поэтому приведение через unknown.
++  // Раздел Настроек виден каждому вошедшему, а маршруты панели — только админам (403 остальным, см. memory-api).
++  const slots = ctx.slots as unknown as {
++    inject: (name: string, factory: () => unknown) => unknown
++    register: (descriptor: Record<string, unknown>, component: unknown) => unknown
++  }
++  slots.inject('settings.section', () => slots.register({
++    name: 'settings.section',
++    id: PANEL_ID,
++    order: 50,
++    label: () => t('panel'),
++    locale: NS,
++    inject: () => memoryFace(ctx),
++  }, MemoryPage))
+   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+     name: 'sidebar.panellist',
+     id: PANEL_ID,
+diff --git a/src/client/locales.ts b/src/client/locales.ts
+index 972c03a..44a99c5 100644
+--- a/src/client/locales.ts
++++ b/src/client/locales.ts
+@@ -386,3 +386,198 @@ export const en: Record<PluginMemoryLocaleKey, string> = {
+   usageFixed: 'fixed',
+   usageFixedTip: 'fixed overhead (write guidance etc.; does not grow with memories; counted inside the cap)',
+ }
++
++/**
++ * Русский словарь панели (1.10.0). В сборке-приёмнике локаль плоская и только русская:
++ * `locale.register(NS, ru)` без языкового измерения. Ключи — те же, что в zh/en (проверяется типом).
++ */
++export const ru: Record<PluginMemoryLocaleKey, string> = {
++  panel: 'Память',
++  title: 'Постоянная память',
++  intro: 'Управление файлами памяти, которые сохраняются между сессиями',
++  loading: 'Загружаю память…',
++  error: 'Сейчас не удаётся загрузить память.',
++  retry: 'Повторить',
++  refresh: 'Обновить',
++  empty: 'Записей пока нет. Скажите агенту «запомни…», чтобы создать первую.',
++  emptyTitle: 'Записей пока нет',
++  userScope: 'Уровень пользователя (все рабочие области)',
++  userScopeShort: 'Пользователь',
++  userScopeHint: 'общая для всех рабочих областей',
++  allScopes: 'Все',
++  clearFilters: 'Сбросить фильтры',
++  projectScope: 'Уровень проекта',
++  pinned: 'закреплено',
++  activeState: 'активна',
++  muted: 'отключена (не попадает в контекст)',
++  muteAction: 'Отключить',
++  unmuteAction: 'Включить',
++  reads: 'чтений',
++  updated: 'обновлено',
++  injectedPreview: 'Индекс, который попадёт в следующую сессию (нажмите для просмотра)',
++  indexUsage: 'Заполнение индекса',
++  budget: 'бюджет внедрения',
++  of: '/',
++  bytes: 'Б',
++  edit: 'Изменить',
++  save: 'Сохранить',
++  cancel: 'Отмена',
++  delete: 'Удалить',
++  confirmDelete: 'Удалить эту запись?',
++  deleteFailed: 'Не удалось удалить',
++  saveFailed: 'Не удалось сохранить',
++  pinAction: 'Закрепить',
++  unpinAction: 'Открепить',
++  projectNeedsSession: 'Откройте сессию в этой рабочей области, чтобы править эту группу',
++  currentBadge: 'Текущая рабочая область',
++  searchPlaceholder: 'Поиск по памяти (имя/описание)…',
++  noSearchHits: 'Подходящих записей нет.',
++  overviewMemories: 'записей',
++  overviewPinned: 'закреплено',
++  overviewMuted: 'отключено',
++  overviewStale: 'устарели (не внедряются)',
++  staleState: 'устарела (нет в индексе)',
++  staleShort: 'устарела',
++  mutedShort: 'отключена',
++  allTypes: 'Все типы',
++  readonlyBadge: 'только чтение',
++  notInjectedHint: 'другая рабочая область · не входит в это внедрение',
++  showBody: 'Текст',
++  hideBody: 'Скрыть текст',
++  bodyLoading: 'Загружаю текст…',
++  bodyLoadFailed: 'Не удалось загрузить текст.',
++  emptyStep1: 'Скажите агенту: «Запомни: я …»',
++  emptyStep2: 'Он вызовет memory_write — на диск ляжет обычный Markdown-файл памяти',
++  emptyStep3: 'Следующая сессия начнётся с уже внедрённым индексом памяти',
++  justNow: 'только что',
++  minutesAgo: '{n} мин назад',
++  hoursAgo: '{n} ч назад',
++  daysAgo: '{n} дн назад',
++  name: 'Имя',
++  descriptionField: 'Описание',
++  bodyField: 'Текст',
++  titleField: 'Заголовок (необязательно)',
++  importBtn: 'Импорт из Claude Code',
++  importTitle: 'Импорт памяти Claude Code',
++  importEmpty: 'Нечего импортировать: файлов памяти Claude Code в ~/.claude/projects не найдено.',
++  importScanFailed: 'Не удалось просканировать.',
++  importRunFailed: 'Импорт/отмена не завершились (выполненное сохранено, можно повторить — список обновлён).',
++  importNoCwd: 'путь источника неизвестен → уровень пользователя',
++  importAllToUser: 'Импортировать всё на уровень пользователя (без разбивки по проектам)',
++  importApplyCount: 'Применить ({n} импорт / {r} отмена)',
++  importApplying: 'Применяю…',
++  importRevokeWarning: 'Записи с тем же именем пропускаются, а не перезаписываются. Снятие отметки с импортированной записи удаляет её из плагина при применении; записи, изменённые после импорта, сохраняются.',
++  importStateImported: 'импортирована',
++  importStateLegacy: 'старый импорт',
++  importStateModified: 'изменена',
++  importStateConflict: 'имя занято',
++  importStateLegacyHint: 'Импортирована версией 0.8.0 (без метки происхождения); содержимое в точности совпадает с источником, поэтому снятие отметки удалит её',
++  importStateModifiedHint: 'Изменена после импорта — снятие отметки её не удалит',
++  importStateConflictHint: 'Запись с тем же именем, не из этого исходного файла — не затрагивается',
++  importKeptNote: 'Сохранено изменённых/отсутствующих записей: {k}.',
++  importDone: 'Готово: импортировано {n} / пропущено {s} (то же имя) / отменено {r} / ошибок {f}',
++  importedBadge: 'Импортировано из Claude Code',
++  statsTitle: 'Статистика внедрения',
++  statsSessions: 'сессий',
++  statsInjections: 'внедрений',
++  statsTopInjected: 'Чаще всего внедряемые записи',
++  statsTimeline: 'Последние внедрения',
++  statsMemories: 'записей',
++  statsTruncated: 'обрезано ',
++  statsAvg: 'средний размер сегмента',
++  statsTruncatedTop: 'Обрезка по бюджету (вытеснено)',
++  statsProjects: 'По проектам',
++  statsProjectsRecent: 'считается по последним 50 внедрениям до перезапуска сервера',
++  statsProjectCol: 'Проект',
++  statsProjectSessions: 'Сессии',
++  statsProjectInjections: 'Внедрения',
++  statsProjectAvg: 'Средний сегмент',
++  statsAll: 'Все {n}',
++  statsAllInjected: 'Все {n} записей присутствуют в каждом из {m} внедрений',
++  scopeUser: 'слой пользователя',
++  scopeProject: 'слой проекта',
++  statusCandidate: 'кандидат',
++  statusVerified: 'подтверждена',
++  statusDisputed: 'спорная',
++  statusSuperseded: 'заменена',
++  verifyAction: '✓ Подтвердить',
++  disputeAction: '⊘ Оспорить',
++  restoreAction: 'Вернуть в контекст',
++  evidenceTitle: 'Основание',
++  healthTitle: 'Состояние памяти',
++  healthUnverified: 'Не подтверждены (кандидаты)',
++  healthZombies: 'Забытые (30 дн, ни одного чтения)',
++  healthConflicts: 'Подозрение на конфликт',
++  healthNone: 'Ничего не требует внимания.',
++  healthCrossScope: 'одно имя в обоих слоях',
++  healthNearDup: 'почти дубликат',
++  healthView: 'найти',
++  statusTipCandidate: 'Сформирована моделью, ещё не подтверждена — подтвердите, чтобы повысить доверие',
++  statusTipDisputed: 'Остановлена защитой от инъекций или оспорена вами — не внедряется, можно восстановить',
++  exportAction: 'Экспорт в AGENTS.md',
++  exportTip: 'Скопировать доверенные записи (подтверждённые/без метки) как фрагмент AGENTS.md — подойдёт любому инструменту по соглашению AGENTS.md',
++  exportDone: 'Скопировано в буфер обмена',
++  exportFailed: 'Не удалось экспортировать',
++  importHint: 'Готово к синхронизации записей Claude Code: {n}',
++  lineageReplaces: 'заменяет более старую запись {name} (линия эволюции)',
++  statsActivity: 'Активность внедрения (последние 24)',
++  statsScopeShare: 'Доли по слоям (по внедрениям)',
++  statsTypeShare: 'Доли по типам (все записи)',
++  statsTruncMetric: 'обрезок по бюджету',
++  statsExpand: 'Развернуть, чтобы увидеть записи, внедрённые в этом событии',
++  statsCollapse: 'Свернуть',
++  settingsTitle: 'Настройки',
++  settingsIntro: 'Настройки во время работы: применяются сразу (без перезапуска), хранятся в settings.json хранилища памяти',
++  presetFocus: '🎯 Фокус (код)',
++  presetFocusTip: 'Бюджет 4 КБ / порог ценности 4 — сначала главное, бытовая мелочь отсекается',
++  presetCompanion: '💬 Собеседник (повседневное)',
++  presetCompanionTip: 'Бюджет 16 КБ / порог 1 — сохраняем факты о жизни, dsh как повседневный помощник',
++  presetActive: 'активно',
++  setMaxBytes: 'Бюджет индекса',
++  setMaxBytesHint: 'Общий предел на одно внедрение, включая фиксированные накладные расходы (правила записи; см. шкалу вверху); пустое хранилище всегда стоит ноль',
++  setMinImportance: 'Порог ценности',
++  setMinImportanceHint: 'Кандидаты консолидации ниже этой оценки не записываются (0 = выкл.); выше — строже',
++  setStaleDays: 'Мягкое вытеснение (дней)',
++  setStaleDaysHint: 'Записи без чтений старше N дней перестают внедряться (файлы сохраняются); 0 = выкл.',
++  setAutoSummarize: 'Автоконсолидация по ходу сессии',
++  setAutoSummarizeMax: 'Предел записей за проход',
++  setSave: 'Сохранить настройки',
++  setSaved: 'Сохранено и применено',
++  setSaveFailed: 'Не удалось сохранить',
++  setSourceProfile: 'профиль',
++  setSourceOverride: 'ваше значение',
++  setFits: 'В текущий бюджет помещается ≈ {n} записей',
++  setResetField: 'Вернуть значение профиля',
++  recallTitle: 'Рейтинг обращений',
++  recallHint: 'чтения = модель сама обратилась к записи (memory_read / попадание в поиск) — разрыв с внедрениями показывает напрасные расходы',
++  recallTop: 'Чаще всего читаемые',
++  funnelTitle: 'Воронка: внедрение → обращение',
++  funnelQuadHH: 'Высокая ценность (внедряется и читается)',
++  funnelQuadHZ: 'Пожиратель бюджета (внедряется, не читается)',
++  funnelQuadLH: 'Скрытая жемчужина (редко внедряется, читается)',
++  funnelQuadLL: 'Низкая активность (и то и другое мало)',
++  funnelSuggestMute: 'стоит отключить',
++  funnelSuggestPin: 'стоит закрепить',
++  scopeBoth: 'слои пользователя + проекта',
++  scopeMissing: 'нет в текущем индексе',
++  tabMemories: 'Записи',
++  tabInsights: 'Аналитика',
++  tabHealth: 'Состояние',
++  showingOf: 'показано {shown} / {total} (с фильтром)',
++  healthHint: 'нажмите на запись, чтобы перейти к её карточке',
++  healthLocateTip: 'найти карточку этой записи',
++  legendInj: 'внедрено',
++  legendRec: 'прочитано',
++  legendRatio: 'правый столбец = чтения/внедрения',
++  expiredBadge: 'истекла',
++  expiredAgo: 'истекла {n} дн назад',
++  renewAction: '↻ продлить на 90 дн',
++  renewFailed: 'не удалось продлить',
++  healthExpired: 'Истекшие (больше не внедряются)',
++  validUntilField: 'Срок действия (дней)',
++  validUntilHint: 'Для фактов, которые устаревают; после истечения запись перестаёт внедряться. Введите число, чтобы задать/продлить; очистите прежнее число, чтобы сделать бессрочной; не трогайте поле, чтобы оставить как есть',
++  validUntilNone: 'бессрочно',
++  usageIdx: 'индекс',
++  usageFixed: 'фикс.',
++  usageFixedTip: 'фиксированные накладные расходы (правила записи и т. п.; не растут с числом записей; входят в предел)',
++}
+diff --git a/src/consolidate.ts b/src/consolidate.ts
+index 5d6f52d..c740eaf 100644
+--- a/src/consolidate.ts
++++ b/src/consolidate.ts
+@@ -332,6 +332,8 @@ interface SessionCapture {
+   pending: string[]
+   /** Число новых настоящих пользовательских сообщений в pending (счётчик порога запуска). */
+   pendingUsers: number
++  /** Последний агент сессии: нужен, чтобы дозафиксировать хвост на session/disposed (там агента уже нет). */
++  lastAgent?: AgentLike
+   /** В этой сессии уже идёт консолидация (в одной сессии не параллелим, новое содержимое остаётся в pending до следующего раза). */
+   busy: boolean
+ }
+@@ -586,6 +588,7 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
+   ctx.on('agent/turn-stopping', ({ agent }) => {
+     if (!options.autoSummarize) return
+     const cap = captures.get(agent.session.id)
++    if (cap !== undefined) cap.lastAgent = agent as unknown as AgentLike
+     if (cap === undefined || cap.busy || cap.pendingUsers < everyTurns()) return
+     startConsolidation(agent, cap)
+   })
+@@ -603,8 +606,13 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
+   })
+ 
+   // 会话离开 live store 时兜底清理缓冲(agent/disposed 未覆盖的关闭路径)
++  // Штатное закрытие сессии: дозафиксировать хвост (если агент ещё не освобождён и есть непросчитанные
++  // пользовательские сообщения), затем убрать буфер. Аварийное завершение процесса хвост всё равно теряет.
+   ctx.on('session/disposed', session => {
++    const cap = captures.get(session.id)
+     captures.delete(session.id)
++    if (cap === undefined || !options.autoSummarize || cap.busy || cap.lastAgent === undefined) return
++    startConsolidation(cap.lastAgent, cap)
+   })
+ 
+   // teardown:先中止在途 LLM 调用,再排空(emit 监听不被 await,优雅退出靠这里兜底)
+diff --git a/src/identity.ts b/src/identity.ts
+new file mode 100644
+index 0000000..401c99c
+--- /dev/null
++++ b/src/identity.ts
+@@ -0,0 +1,86 @@
++/**
++ * Мост к сервису аутентификации хоста (`webAuth` в веб-сборке dsh): единый источник прав админа
++ * и личность автора веб-запроса для маршрутов панели.
++ *
++ * ВАЖНО: форма сервиса `webAuth` здесь НЕ проверена на реальной сборке (в зависимостях плагина
++ * её типов нет). Мост написан «по утиной типизации» и в сомнительных случаях закрывается
++ * (fail-closed): нет ответа — считаем «неизвестно», а для панели это 403. Уточните точные
++ * методы по `webauth.ts` / `web-identity.ts` сборки и поправьте `ADMIN_CHECKS` / `IDENTIFY`.
++ */
++
++import type { Context } from '@deepseek-ai/cordis'
++
++type Loose = Record<string, unknown>
++
++export interface IdentityBridge {
++  /** Сервис аутентификации присутствует (многопользовательский веб). Иначе панель работает как раньше (локальный админ). */
++  active: () => boolean
++  /** true/false — авторитетный ответ хоста; undefined — хост ответить не смог (используется запасной список `admins`). */
++  isAdmin: (login: string) => boolean | undefined
++  /** Логин автора запроса; undefined — не удалось определить (панель отвечает 403). */
++  identify: (request: Request) => Promise<string | undefined>
++}
++
++function toLogin(value: unknown): string | undefined {
++  if (typeof value === 'string' && value.length > 0) return value
++  if (value !== null && typeof value === 'object') {
++    const obj = value as Loose
++    for (const key of ['login', 'username', 'user', 'id', 'name']) {
++      const v = obj[key]
++      if (typeof v === 'string' && v.length > 0) return v
++    }
++  }
++  return undefined
++}
++
++/** Имена методов, под которыми сервис может отдавать проверку админа / личность (подправить по сборке). */
++const ADMIN_METHODS = ['isAdmin', 'isAdminLogin'] as const
++const ADMIN_COLLECTIONS = ['admins', 'adminLogins'] as const
++const IDENTIFY_METHODS = ['identify', 'requestIdentity', 'userFromRequest', 'getRequestUser'] as const
++
++export function createIdentityBridge(ctx: Context): IdentityBridge {
++  const service = (): Loose | undefined => {
++    const svc = (ctx as unknown as { get: (name: string) => unknown }).get('webAuth')
++    return svc !== null && typeof svc === 'object' ? svc as Loose : undefined
++  }
++  return {
++    active: () => service() !== undefined,
++    isAdmin: login => {
++      const svc = service()
++      if (svc === undefined) return undefined
++      try {
++        for (const name of ADMIN_METHODS) {
++          const fn = svc[name]
++          if (typeof fn === 'function') {
++            const answer = (fn as (l: string) => unknown).call(svc, login)
++            if (typeof answer === 'boolean') return answer
++          }
++        }
++        for (const name of ADMIN_COLLECTIONS) {
++          const coll = svc[name]
++          if (coll instanceof Set) return coll.has(login)
++          if (Array.isArray(coll)) return coll.includes(login)
++        }
++      } catch {
++        // сервис недоступен/упал — «не знаю», решает запасной список
++      }
++      return undefined
++    },
++    identify: async request => {
++      const svc = service()
++      if (svc === undefined) return undefined
++      try {
++        for (const name of IDENTIFY_METHODS) {
++          const fn = svc[name]
++          if (typeof fn === 'function') {
++            const login = toLogin(await (fn as (r: Request) => unknown).call(svc, request))
++            if (login !== undefined) return login
++          }
++        }
++      } catch {
++        // не смогли определить — fail-closed на стороне вызывающего
++      }
++      return undefined
++    },
++  }
++}
+diff --git a/src/index.ts b/src/index.ts
+index 83e16fc..b2f28f7 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -22,6 +22,8 @@ import { registerConsolidation } from './consolidate.ts'
+ import { registerRecall } from './recall.ts'
+ import { ownerOf } from './owner.ts'
+ import { registerCuration } from './curate.ts'
++import { createIdentityBridge } from './identity.ts'
++import { registerInjectionGate } from './injection-gate.ts'
+ import { registerMemoryApi } from './memory-api.ts'
+ import { loadSettings, applySettings, SETTABLE_FIELDS } from './settings.ts'
+ 
+@@ -69,6 +71,10 @@ export interface Config {
+   curateIntervalHours?: number
+   /** Максимум слияний за один проход. */
+   curateMaxMerges?: number
++  /** 1.10.0: гейт инъекций — memory_write после чтения внешнего контента идёт через подтверждение человека. */
++  injectionGate?: boolean
++  /** Маски имён инструментов, чтение которых «заражает» ход (пусто = набор по умолчанию). */
++  untrustedTools?: string[]
+ }
+ 
+ export const Config: z<Config> = z.object({
+@@ -92,6 +98,8 @@ export const Config: z<Config> = z.object({
+   curate: z.boolean().default(true),
+   curateIntervalHours: z.number().default(24),
+   curateMaxMerges: z.number().default(3),
++  injectionGate: z.boolean().default(true),
++  untrustedTools: z.array(z.string()).default([]),
+ })
+ 
+ export function apply(ctx: Context, config: Config): void {
+@@ -109,10 +117,14 @@ export function apply(ctx: Context, config: Config): void {
+   void loadSettings(rootDir).then(overrides => { Object.assign(live, overrides) })
+   // 1.8.0: staleAfterDays/admins передаются функциями, вычисляемыми при чтении, — представления по владельцам, получаемые через withOwner,
+   // используют один live-источник (изменения в центре настроек сразу действуют на все представления)
++  // 1.10.0: мост к webAuth хоста — единый источник прав админа (запасной — список admins из конфига)
++  const identity = createIdentityBridge(ctx)
+   const store = new MemoryStore(rootDir, {
+     staleAfterDays: () => live.staleAfterDays,
+     admins: () => live.admins,
++    adminResolver: login => identity.isAdmin(login),
+   })
++  const gate = registerInjectionGate(ctx, live)
+ 
+   registerMemoryTools(ctx, store, live)
+ 
+@@ -121,7 +133,7 @@ export function apply(ctx: Context, config: Config): void {
+   // 回调使用框架给的 fiber ctx 注册,依赖消失时路由 effect 随作用域自动回收。
+   // 1.4.0:传 live 对象——预算/淘汰参数在设置变更后立即反映到面板
+   ctx.inject(['connection'], fiberCtx => {
+-    registerMemoryApi(fiberCtx, store, rootDir, live as unknown as Parameters<typeof registerMemoryApi>[3], profileDefaults as unknown as Record<string, unknown>)
++    registerMemoryApi(fiberCtx, store, rootDir, live as unknown as Parameters<typeof registerMemoryApi>[3], profileDefaults as unknown as Record<string, unknown>, identity)
+   })
+ 
+   // P1:会话结束自动固化(autoSummarize=false 时 no-op);
+@@ -174,5 +186,6 @@ export function apply(ctx: Context, config: Config): void {
+     consolidation.cleanup(session.id)
+     recall.cleanup(session.id)
+     curation.cleanup(session.id)
++    gate.cleanup(String(session.id))
+   })
+ }
+diff --git a/src/injection-gate.ts b/src/injection-gate.ts
+new file mode 100644
+index 0000000..71acbc0
+--- /dev/null
++++ b/src/injection-gate.ts
+@@ -0,0 +1,73 @@
++/**
++ * Гейт против инъекций через память (замена штатного memory-policy): если в текущем ходу агент
++ * читал недоверенный внешний контент (документы, веб, поиск), то `memory_write` в этом ходу идёт
++ * только через подтверждение человека. Так текст из закупочной документации или страницы не может
++ * молча прописать себе инструкции в постоянную память.
++ *
++ * Определение «недоверенного» инструмента — список имён/масок `untrustedTools` в конфиге
++ * (`*` = любая подстрока; регистр не важен). Инструменты самой памяти (`memory_*`) никогда
++ * не считаются источником заражения. Метка хода сбрасывается на границе хода и при закрытии сессии.
++ */
++
++import type { Context } from '@deepseek-ai/cordis'
++import { askHuman } from './ask.ts'
++
++export interface InjectionGateOptions {
++  /** Включён ли гейт (по умолчанию да). */
++  injectionGate?: boolean
++  /** Маски имён инструментов, чтение которых «заражает» ход. */
++  untrustedTools?: string[]
++}
++
++/** Набор по умолчанию: типичные имена; реальные имена вашей сборки задайте в конфиге. */
++export const DEFAULT_UNTRUSTED_TOOLS: readonly string[] = [
++  'web_*', '*fetch*', '*search*', '*browse*', '*document*', '*pdf*', '*docx*', '*xlsx*', 'read_url*',
++]
++
++/** Сопоставление имени с маской (`*` — любая подстрока); экспортируется для тестов. */
++export function matchesToolPattern(name: string, pattern: string): boolean {
++  const escaped = pattern.toLowerCase().replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*')
++  return new RegExp(`^${escaped}$`).test(name.toLowerCase())
++}
++
++export function isUntrustedTool(name: string, patterns: readonly string[]): boolean {
++  if (name.startsWith('memory_')) return false
++  return patterns.some(pattern => matchesToolPattern(name, pattern))
++}
++
++export interface InjectionGateHandle {
++  /** Какой инструмент заразил ход (для тестов/отладки). */
++  taintedBy: (sessionId: string) => string | undefined
++  cleanup: (sessionId: string) => void
++}
++
++export function registerInjectionGate(ctx: Context, options: InjectionGateOptions): InjectionGateHandle {
++  const tainted = new Map<string, string>()
++  const patterns = (): readonly string[] =>
++    options.untrustedTools !== undefined && options.untrustedTools.length > 0 ? options.untrustedTools : DEFAULT_UNTRUSTED_TOOLS
++
++  ctx.on('tools/pre-execute', async (exec, next) => {
++    const decision = await next()
++    if (decision.kind !== 'allow') return decision
++    if (options.injectionGate === false) return decision
++    const sessionId = String((exec as unknown as { agent?: { session?: { id?: unknown } } }).agent?.session?.id ?? '')
++    if (sessionId.length === 0) return decision
++    if (exec.name === 'memory_write') {
++      const source = tainted.get(sessionId)
++      if (source === undefined) return decision
++      return askHuman(`memory_write после чтения внешнего контента (${source}): подтвердите, что запись исходит от вас, а не из текста документа/страницы`)
++    }
++    if (isUntrustedTool(exec.name, patterns())) tainted.set(sessionId, exec.name)
++    return decision
++  })
++
++  // Новый ход — чистая метка: если пользователь сам просит «запомни» следующим сообщением, это его явная воля
++  ctx.on('agent/turn-stopping', ({ agent }) => {
++    tainted.delete(String(agent.session.id))
++  })
++
++  return {
++    taintedBy: sessionId => tainted.get(sessionId),
++    cleanup: sessionId => { tainted.delete(sessionId) },
++  }
++}
+diff --git a/src/memory-api.ts b/src/memory-api.ts
+index 0d29241..ef25987 100644
+--- a/src/memory-api.ts
++++ b/src/memory-api.ts
+@@ -30,6 +30,7 @@ import { indexByteBudget } from './prompt.ts'
+ import { homedir } from 'node:os'
+ import type { MemoryEvidence, MemoryRecord, MemoryScope, MemoryStatus, MemoryType } from './types.ts'
+ import { USER_SCOPE_DIR } from './types.ts'
++import type { IdentityBridge } from './identity.ts'
+ 
+ /** 面板条目(浏览器可见的字段子集)。 */
+ export interface PanelMemory {
+@@ -288,9 +289,31 @@ export function registerMemoryApi(
+   // 1.4.0:profile 声明的原始值(live 的回退源)——单字段"重置回 profile
+   // 默认"时从这里恢复(config.set 的 null 语义)
+   profileDefaults: Record<string, unknown>,
++  // 1.10.0: мост к webAuth хоста. Сервис есть (многопользовательский веб) → маршруты только для админов (иначе 403);
++  // сервиса нет (локальная/одиночная сборка) → поведение прежнее.
++  identity?: IdentityBridge,
+ ): void {
+   const connection = ctx.get('connection')
+   if (connection === undefined) return // 非 web 组合:面板不存在,不注册
++  const forbidden = (): Response => new Response(JSON.stringify({ error: 'forbidden: memory panel is available to admins only' }), {
++    status: 403, headers: { 'content-type': 'application/json' },
++  })
++  /** Гейт маршрутов панели: null = пропустить, Response = отказ. Fail-closed: личность не определена → 403. */
++  const gate = async (request: Request): Promise<Response | null> => {
++    if (identity === undefined || !identity.active()) return null
++    const login = await identity.identify(request)
++    if (login === undefined) return forbidden()
++    return store.withOwner(login).isAdmin() ? null : forbidden()
++  }
++  const register = (route: Parameters<typeof connection.fetch.register>[0]): ReturnType<typeof connection.fetch.register> =>
++    connection.fetch.register({
++      ...route,
++      fetch: (async (request: Request, ...rest: unknown[]) => {
++        const denied = await gate(request)
++        if (denied !== null) return denied
++        return (route.fetch as (r: Request, ...a: unknown[]) => Promise<Response>)(request, ...rest)
++      }) as typeof route.fetch,
++    })
+   const home = (config.homeDir as string | undefined) ?? homedir()
+   const staleAfterDays = () => (config.staleAfterDays as number | undefined) ?? 0
+   // 磁盘覆盖 + profile 默认 → 每字段生效值;顺带同步进 live(GET/Set 后双轨对齐)
+@@ -303,7 +326,7 @@ export function registerMemoryApi(
+     }
+   }
+ 
+-  connection.fetch.register({
++  register({
+     path: `${BASE}/config.get`, methods: ['GET'], requestBody: 'buffered',
+     fetch: async () => {
+       // 设置中心:当前生效值 + 每字段来源(profile 声明 vs 用户覆盖)。
+@@ -323,7 +346,7 @@ export function registerMemoryApi(
+     },
+   })
+ 
+-  connection.fetch.register({
++  register({
+     path: `${BASE}/config.set`, methods: ['POST'], requestBody: 'buffered',
+     fetch: async (request) => {
+       try {
+@@ -373,7 +396,7 @@ export function registerMemoryApi(
+       headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+     }))
+ 
+-  connection.fetch.register({
++  register({
+     path: `${BASE}/groups.list`, methods: ['GET'], requestBody: 'buffered',
+     fetch: async (request) => {
+       const cwd = new URL(request.url).searchParams.get('cwd') ?? undefined
+@@ -390,7 +413,7 @@ export function registerMemoryApi(
+     },
+   })
+ 
+-  connection.fetch.register({
++  register({
+     path: `${BASE}/memory.read`, methods: ['GET'], requestBody: 'buffered',
+     fetch: async (request) => {
+       const url = new URL(request.url)
+@@ -408,7 +431,7 @@ export function registerMemoryApi(
+     },
+   })
+ 
+-  connection.fetch.register({
++  register({
+     path: `${BASE}/memory.write`, methods: ['POST'], requestBody: 'buffered',
+     fetch: async (request) => {
+       try {
+@@ -461,7 +484,7 @@ export function registerMemoryApi(
+     },
+   })
+ 
+-  connection.fetch.register({
++  register({
+     path: `${BASE}/import.claude.scan`, methods: ['GET'], requestBody: 'buffered',
+     fetch: async () => {
+       // 只读扫描:遍历 ~/.claude/projects/*/memory,返回逐项目/逐条预览(目标层、
+@@ -492,7 +515,7 @@ export function registerMemoryApi(
+     },
+   })
+ 
+-  connection.fetch.register({
++  register({
+     path: `${BASE}/import.claude.apply`, methods: ['POST'], requestBody: 'buffered',
+     fetch: async (request) => {
+       try {
+@@ -524,7 +547,7 @@ export function registerMemoryApi(
+     },
+   })
+ 
+-  connection.fetch.register({
++  register({
+     path: `${BASE}/audit.stats`, methods: ['GET'], requestBody: 'buffered',
+     fetch: async () => {
+       // 注入审计统计(0.9.0):读 audit.jsonl 聚合,坏行已在读取层跳过;
+@@ -534,7 +557,7 @@ export function registerMemoryApi(
+     },
+   })
+ 
+-  connection.fetch.register({
++  register({
+     path: `${BASE}/health.report`, methods: ['GET'], requestBody: 'buffered',
+     fetch: async () => {
+       // 记忆体检(1.0.0 可信记忆):待验证/僵尸/矛盾三榜,聚合实现在
+@@ -544,7 +567,7 @@ export function registerMemoryApi(
+     },
+   })
+ 
+-  connection.fetch.register({
++  register({
+     path: `${BASE}/export.agents`, methods: ['GET'], requestBody: 'buffered',
+     fetch: async (request) => {
+       // 反向导出桥(1.2.0):信任态记忆 → AGENTS.md 片段(纯文本,复制即用)。
+@@ -563,7 +586,7 @@ export function registerMemoryApi(
+     },
+   })
+ 
+-  connection.fetch.register({
++  register({
+     path: `${BASE}/memory.delete`, methods: ['POST'], requestBody: 'buffered',
+     fetch: async (request) => {
+       try {
+diff --git a/src/store.ts b/src/store.ts
+index f5815e7..f323ef8 100644
+--- a/src/store.ts
++++ b/src/store.ts
+@@ -303,9 +303,13 @@ export function isInjectable(record: MemoryRecord, nowMs: number): boolean {
+     && !isExpired(record, nowMs)
+ }
+ 
+-/** Нормализация логина (без пробелов, нижний регистр): для сравнения owner со списком admins. */
++/**
++ * Нормализация логина для сравнения со списком admins: только обрезка пробелов, БЕЗ приведения регистра.
++ * Так же сравнивает web-auth хоста: `Alice` и `alice` — разные пользователи, и права админа одного
++ * не должны переходить к другому. Логины в нижнем регистре обеспечивает сторона хоста (seed/provision).
++ */
+ function normalizeOwner(owner: string): string {
+-  return owner.trim().toLowerCase()
++  return owner.trim()
+ }
+ 
+ /**
+@@ -516,10 +520,17 @@ export interface MemoryWriteInput extends Omit<MemoryRecord, 'scope' | 'origin'>
+ export interface MemoryStoreOptions {
+   /** Число или функция, вычисляемая при чтении (горячее переключение из центра настроек: представления используют один live-источник). */
+   staleAfterDays?: number | (() => number)
+-  /** Администраторы общего слоя (логины, без учёта регистра). Локальная/CLI-сессия (без owner) всегда админ. */
++  /** Администраторы общего слоя (логины, регистр значим — как в web-auth). Локальная/CLI-сессия (без owner) всегда админ. */
+   admins?: readonly string[] | (() => readonly string[])
+   /** Внутреннее: пользователь, которому принадлежит представление; используйте withOwner(). */
+   owner?: string
++  /**
++   * Внешний источник прав админа (мост к webAuth хоста): true/false — авторитетный ответ,
++   * undefined — «не знаю», тогда решает список `admins` (запасной).
++   */
++  adminResolver?: (owner: string) => boolean | undefined
++  /** Внутреннее: общий слой только на чтение (делегированные сессии без owner — не админы). */
++  sharedReadOnly?: boolean
+ }
+ 
+ export class MemoryStore {
+@@ -528,6 +539,8 @@ export class MemoryStore {
+     this.staleSource = options?.staleAfterDays ?? 0
+     this.adminSource = options?.admins ?? []
+     this.owner = options?.owner
++    this.adminResolver = options?.adminResolver
++    this.sharedReadOnly = options?.sharedReadOnly === true
+     const key = ownerDirKey(this.owner)
+     this.personalRoot = key === undefined ? rootDir : join(rootDir, OWNERS_DIR, key)
+   }
+@@ -544,6 +557,9 @@ export class MemoryStore {
+   }
+   /** Пользователь этого представления; undefined = локально/CLI. */
+   readonly owner: string | undefined
++  private readonly adminResolver: ((owner: string) => boolean | undefined) | undefined
++  /** Общий слой только на чтение (делегированная сессия без owner). */
++  private readonly sharedReadOnly: boolean
+ 
+   /**
+    * Представление хранилища для пользователя (многопользовательский режим, 1.8.0): личные слои (user/project) лежат в его собственном корне,
+@@ -555,15 +571,35 @@ export class MemoryStore {
+     return new MemoryStore(this.baseRoot, {
+       staleAfterDays: this.staleSource,
+       admins: this.adminSource,
++      ...(this.adminResolver !== undefined ? { adminResolver: this.adminResolver } : {}),
+       ...(owner !== undefined ? { owner } : {}),
+     })
+   }
+ 
++  /**
++   * Представление для делегированной (fork-дочерней) сессии без owner: в веб-сборке такие сессии
++   * тоже имеют owner === undefined, и без этой защиты они считались бы локальным админом общего слоя.
++   * Личные слои — как у локального представления, общий слой — только чтение, админом не является.
++   */
++  delegated(): MemoryStore {
++    return new MemoryStore(this.baseRoot, {
++      staleAfterDays: this.staleSource,
++      admins: this.adminSource,
++      ...(this.adminResolver !== undefined ? { adminResolver: this.adminResolver } : {}),
++      ...(this.owner !== undefined ? { owner: this.owner } : {}),
++      sharedReadOnly: true,
++    })
++  }
++
+   /** Админ ли общего слоя: локально/CLI (без owner) — всегда да; пользователь с логином должен быть в списке admins. */
+   isAdmin(): boolean {
++    if (this.sharedReadOnly) return false
+     if (this.owner === undefined) return true
+-    const list = typeof this.adminSource === 'function' ? this.adminSource() : this.adminSource
+     const me = normalizeOwner(this.owner)
++    // Хост (webAuth) — единый источник прав, если ответил; иначе запасной список admins из конфига
++    const external = this.adminResolver?.(me)
++    if (external !== undefined) return external
++    const list = typeof this.adminSource === 'function' ? this.adminSource() : this.adminSource
+     return list.some(admin => normalizeOwner(admin) === me)
+   }
+ 
+@@ -575,6 +611,7 @@ export class MemoryStore {
+ 
+   /** Права на изменение/удаление в общем слое: админ — любые; остальные — только свои ещё не одобренные записи (кандидат/спорная). */
+   private mayModifyShared(record: MemoryRecord): boolean {
++    if (this.sharedReadOnly) return false
+     if (this.isAdmin()) return true
+     return record.author !== undefined
+       && record.author === this.owner
+@@ -699,6 +736,7 @@ export class MemoryStore {
+       // 注入)——superseded 只能经用户面板 restore 离开
+       if (record.onlyIfAbsent === true && existing !== null) return
+       // Права общего слоя (единая точка, вызывающий код обойти не может): не-админ может только создавать или менять свои ещё не одобренные записи
++      if (scope === 'shared' && this.sharedReadOnly) throw new Error('shared memory is read-only in delegated sessions')
+       const sharedNonAdmin = scope === 'shared' && !this.isAdmin()
+       if (sharedNonAdmin && existing !== null && !this.mayModifyShared(existing)) {
+         throw new Error(`shared memory "${record.name}" can only be changed by an admin (it is verified or belongs to another user)`)
+diff --git a/src/tools.ts b/src/tools.ts
+index 4f03ea0..15460e4 100644
+--- a/src/tools.ts
++++ b/src/tools.ts
+@@ -16,6 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
+ import { defineTool } from '@deepseek-ai/dsh-tools'
+ import type { MemoryStore } from './store.ts'
+ import { ownerOf } from './owner.ts'
++import { askHuman } from './ask.ts'
+ import { normalizeName, memoryScore, DEFAULT_IMPORTANCE, detectSecrets, isExpired } from './store.ts'
+ import { descriptionCoverage } from './matching.ts'
+ import { expandLinks } from './links.ts'
+@@ -42,6 +43,17 @@ export function registerMemoryTools(
+     ...(config.enableSharedScope !== false ? ['shared' as const] : []),
+   ]
+ 
++  /**
++   * Представление хранилища для сессии. Делегированные сессии без owner (fork-дети в веб-сборке) получают
++   * общий слой только на чтение и права админа не имеют — иначе owner === undefined делал бы их локальными админами.
++   */
++  const viewFor = (agent: { session: { header: unknown } } | undefined | null): MemoryStore => {
++    const owner = ownerOf(agent)
++    const view = baseStore.withOwner(owner)
++    const depth = (agent?.session.header as { delegationDepth?: number } | undefined)?.delegationDepth ?? 0
++    return owner === undefined && depth > 0 ? view.delegated() : view
++  }
++
+   const guardScope = (scope: MemoryScope): MemoryScope => {
+     if (scope === 'user' && !config.enableUserScope) {
+       throw new Error("user scope is disabled by configuration (enableUserScope: false); use 'project'")
+@@ -120,7 +132,7 @@ export function registerMemoryTools(
+       render: (_args, value) => [{ type: 'text', text: `Memory ${value.operation}: ${value.name} (${value.scope}${value.pinned ? ', pinned' : ''})${value.pendingReview === true ? ' — saved as a CANDIDATE: hidden from colleagues until an admin approves it' : ''}${(value.redacted ?? 0) > 0 ? ` — ⚠ ${String(value.redacted)} secret(s) detected and redacted; do not store credentials in memories` : ''}` }],
+     },
+     async execute(args, exec) {
+-      const store = baseStore.withOwner(ownerOf(exec.agent))
++      const store = viewFor(exec.agent)
+       const cwd = requireCwd(exec.agent?.session.header.cwd)
+       const name = normalizeName(args.name)
+       // 未显式指定 scope:先在可访问层内查重,命中层即更新层;未命中落到 project
+@@ -210,7 +222,7 @@ export function registerMemoryTools(
+       },
+     },
+     async execute(args, exec) {
+-      const store = baseStore.withOwner(ownerOf(exec.agent))
++      const store = viewFor(exec.agent)
+       const cwd = exec.agent?.session.header.cwd
+       const record = await (async () => {
+         const explicit = parseExplicitScope(args.scope)
+@@ -269,7 +281,7 @@ export function registerMemoryTools(
+       }],
+     },
+     async execute(args, exec) {
+-      const store = baseStore.withOwner(ownerOf(exec.agent))
++      const store = viewFor(exec.agent)
+       const cwd = exec.agent?.session.header.cwd
+       const explicit = parseExplicitScope(args.scope)
+       const scopes: readonly MemoryScope[] = explicit !== undefined
+@@ -334,7 +346,7 @@ export function registerMemoryTools(
+       }],
+     },
+     async execute(args, exec) {
+-      const store = baseStore.withOwner(ownerOf(exec.agent))
++      const store = viewFor(exec.agent)
+       const cwd = exec.agent?.session.header.cwd
+       const query = String(args.query ?? '').trim()
+       if (query.length === 0) throw new Error('query must be a non-empty string')
+@@ -389,7 +401,7 @@ export function registerMemoryTools(
+       render: (_args, value) => [{ type: 'text', text: `Deleted memory: ${value.name} (${value.scope})` }],
+     },
+     async execute(args, exec) {
+-      const store = baseStore.withOwner(ownerOf(exec.agent))
++      const store = viewFor(exec.agent)
+       const cwd = exec.agent?.session.header.cwd
+       const name = normalizeName(args.name)
+       const explicit = parseExplicitScope(args.scope)
+@@ -446,7 +458,7 @@ export function registerMemoryTools(
+       },
+     },
+     async execute(args, exec) {
+-      const store = baseStore.withOwner(ownerOf(exec.agent))
++      const store = viewFor(exec.agent)
+       // 下限校验(审查 minor 修复):0/负数会匹配全部有元数据记忆,等于绕过确认的批量删除
+       if (!Number.isSafeInteger(args.olderThanDays) || args.olderThanDays < 1) {
+         throw new Error('olderThanDays must be an integer >= 1')
+@@ -520,7 +532,7 @@ export function registerMemoryTools(
+       }],
+     },
+     async execute(args, exec) {
+-      const store = baseStore.withOwner(ownerOf(exec.agent))
++      const store = viewFor(exec.agent)
+       if (args.confirm !== true) throw new Error('memory_delete_all requires confirm=true (destructive); ask the user first')
+       const cwd = exec.agent?.session.header.cwd
+       const explicit = parseExplicitScope(args.scope)
+@@ -584,7 +596,7 @@ export function registerMemoryTools(
+       },
+     },
+     async execute(args, exec) {
+-      const store = baseStore.withOwner(ownerOf(exec.agent))
++      const store = viewFor(exec.agent)
+       if (config.enableSharedScope === false) throw new Error('shared scope is disabled by configuration (enableSharedScope: false)')
+       if (!store.isAdmin()) throw new Error('memory_review is available to admins only')
+       if (args.action === 'list') {
+@@ -610,18 +622,19 @@ export function registerMemoryTools(
+     const decision = await next()
+     if (decision.kind !== 'allow') return decision
+     if (exec.name === 'memory_delete_all') {
+-      return { kind: 'ask', reason: 'memory_delete_all permanently deletes every memory in scope' }
++      // bypassPolicy: при политике подтверждений 'never' запрос иначе отклонялся бы молча и защита отключалась
++      return askHuman('memory_delete_all permanently deletes every memory in scope')
+     }
+     // Модерация общего слоя: одобрение/отклонение самой моделью не считается — админ должен лично подтвердить в окне подтверждения,
+     // иначе сессия, в которую внедрили инструкции, могла бы сама себя одобрить и протолкнуть вредоносную запись всем
+     if (exec.name === 'memory_review') {
+       const action = (exec.arguments as { action?: string } | null)?.action
+       if (action === 'approve' || action === 'reject') {
+-        return { kind: 'ask', reason: `memory_review ${action}: changes the team-wide shared memory visible to every employee` }
++        return askHuman(`memory_review ${action}: changes the team-wide shared memory visible to every employee`)
+       }
+     }
+     if (exec.name === 'memory_prune' && (exec.arguments as { dryRun?: boolean } | null)?.dryRun === false) {
+-      return { kind: 'ask', reason: 'memory_prune (dryRun=false) permanently deletes matching memories' }
++      return askHuman('memory_prune (dryRun=false) permanently deletes matching memories')
+     }
+     return decision
+   })
+diff --git a/tests/hardening.spec.ts b/tests/hardening.spec.ts
+new file mode 100644
+index 0000000..f7d8ddf
+--- /dev/null
++++ b/tests/hardening.spec.ts
+@@ -0,0 +1,167 @@
++/**
++ * 1.10.0 ужесточение под многопользовательский веб: гейт маршрутов панели (только админы, fail-closed),
++ * мост админов из webAuth, делегированные сессии без owner, гейт инъекций, точное сравнение логинов,
++ * дозапись хвоста консолидации на session/disposed.
++ */
++
++import { afterEach, beforeEach, describe, expect, it } from 'vitest'
++import { promises as fsp } from 'node:fs'
++import { join } from 'node:path'
++import { tmpdir } from 'node:os'
++import { Context } from '@deepseek-ai/cordis'
++import { MemoryStore } from '../src/store.ts'
++import { registerMemoryApi } from '../src/memory-api.ts'
++import { createIdentityBridge } from '../src/identity.ts'
++import { isUntrustedTool, matchesToolPattern, registerInjectionGate } from '../src/injection-gate.ts'
++import { registerConsolidation } from '../src/consolidate.ts'
++import type { ConsolidationOptions } from '../src/consolidate.ts'
++
++let root: string
++const input = (name: string) => ({ name, description: `d ${name}`, type: 'reference' as const, body: `b ${name}` })
++
++beforeEach(async () => { root = await fsp.mkdtemp(join(tmpdir(), 'dsh-hard-')) })
++afterEach(async () => { await fsp.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) })
++
++describe('сравнение логинов и мост админов', () => {
++  it('admins сравниваются точно: Alice не получает прав админа alice', () => {
++    const store = new MemoryStore(root, { admins: ['alice'] })
++    expect(store.withOwner('alice').isAdmin()).toBe(true)
++    expect(store.withOwner('Alice').isAdmin()).toBe(false)
++  })
++
++  it('ответ хоста авторитетен, «не знаю» → запасной список', () => {
++    const answers = new Map<string, boolean>([['host-admin', true], ['listed', false]])
++    const store = new MemoryStore(root, { admins: ['listed', 'fallback'], adminResolver: l => answers.get(l) })
++    expect(store.withOwner('host-admin').isAdmin()).toBe(true) // хост сказал да, в списке нет
++    expect(store.withOwner('listed').isAdmin()).toBe(false) // хост сказал нет — список не спасает
++    expect(store.withOwner('fallback').isAdmin()).toBe(true) // хост не знает → список
++    expect(store.withOwner('nobody').isAdmin()).toBe(false)
++  })
++
++  it('делегированное представление без owner: не админ и общий слой только на чтение', async () => {
++    const store = new MemoryStore(root)
++    await store.write({ ...input('pub'), status: 'verified' }, 'shared')
++    const child = store.delegated()
++    expect(child.isAdmin()).toBe(false)
++    expect((await child.read('pub', 'shared'))?.name).toBe('pub') // читать можно
++    await expect(child.write(input('x'), 'shared')).rejects.toThrow(/read-only/)
++    await expect(child.delete('pub', 'shared')).rejects.toThrow()
++    await expect(child.clear('shared')).rejects.toThrow(/admin/)
++    expect(store.isAdmin()).toBe(true) // родитель (локальный) не пострадал
++  })
++})
++
++describe('мост identity', () => {
++  const ctxWith = (svc: unknown) => ({ get: (n: string) => (n === 'webAuth' ? svc : undefined) }) as unknown as Context
++  it('нет webAuth → не активен', async () => {
++    const bridge = createIdentityBridge(ctxWith(undefined))
++    expect(bridge.active()).toBe(false)
++    expect(bridge.isAdmin('a')).toBeUndefined()
++    expect(await bridge.identify(new Request('http://x/'))).toBeUndefined()
++  })
++  it('утиная типизация: isAdmin(), admins-коллекция, identify()', async () => {
++    const bridge = createIdentityBridge(ctxWith({
++      isAdmin: (l: string) => l === 'boss',
++      identify: async () => ({ login: 'boss' }),
++    }))
++    expect(bridge.active()).toBe(true)
++    expect(bridge.isAdmin('boss')).toBe(true)
++    expect(bridge.isAdmin('x')).toBe(false)
++    expect(await bridge.identify(new Request('http://x/'))).toBe('boss')
++    expect(createIdentityBridge(ctxWith({ admins: new Set(['a']) })).isAdmin('a')).toBe(true)
++  })
++  it('сбой сервиса → «не знаю», без исключения', async () => {
++    const bridge = createIdentityBridge(ctxWith({ isAdmin: () => { throw new Error('boom') }, identify: async () => { throw new Error('boom') } }))
++    expect(bridge.isAdmin('a')).toBeUndefined()
++    expect(await bridge.identify(new Request('http://x/'))).toBeUndefined()
++  })
++})
++
++describe('гейт маршрутов панели', () => {
++  const BASE = '/api/auto-memory'
++  const mount = (identity: ReturnType<typeof createIdentityBridge> | undefined, store: MemoryStore) => {
++    const routes = new Map<string, (r: Request) => Promise<Response>>()
++    const connection = { fetch: { register: (route: { path: string, fetch: (r: Request) => Promise<Response> }): void => { routes.set(route.path, route.fetch) } } }
++    const ctx = { get: (n: string) => (n === 'connection' ? connection : undefined) } as unknown as Context
++    registerMemoryApi(ctx, store, join(root, 'memory-root'), { maxBytes: 4096, homeDir: root }, { maxBytes: 4096 }, identity)
++    return (req: Request) => routes.get(`${BASE}/groups.list`)!(req)
++  }
++  const bridgeFor = (login: string | undefined): ReturnType<typeof createIdentityBridge> => ({
++    active: () => true, isAdmin: () => undefined, identify: async () => login,
++  })
++
++  it('без webAuth (identity не активен) — как раньше', async () => {
++    const call = mount(undefined, new MemoryStore(root))
++    expect((await call(new Request('http://x/'))).status).toBe(200)
++  })
++  it('не определили личность → 403; не админ → 403; админ → 200', async () => {
++    const store = new MemoryStore(root, { admins: ['boss'] })
++    expect((await mount(bridgeFor(undefined), store)(new Request('http://x/'))).status).toBe(403)
++    expect((await mount(bridgeFor('alice'), store)(new Request('http://x/'))).status).toBe(403)
++    expect((await mount(bridgeFor('boss'), store)(new Request('http://x/'))).status).toBe(200)
++    expect((await mount(bridgeFor('Boss'), store)(new Request('http://x/'))).status).toBe(403) // регистр значим
++  })
++})
++
++describe('гейт инъекций', () => {
++  it('маски имён: * = подстрока, memory_* никогда не заражает', () => {
++    expect(matchesToolPattern('web_fetch', 'web_*')).toBe(true)
++    expect(matchesToolPattern('Read_Document', '*document*')).toBe(true)
++    expect(isUntrustedTool('memory_search', ['*search*'])).toBe(false)
++    expect(isUntrustedTool('bash', ['web_*'])).toBe(false)
++  })
++
++  it('после чтения внешнего контента memory_write идёт через ask; в новом ходу — свободно', async () => {
++    const ctx = new Context()
++    const gate = registerInjectionGate(ctx, { untrustedTools: ['read_doc*'] })
++    const agent = { session: { id: 's1' } }
++    const call = (name: string) => (ctx as unknown as { waterfall: (n: string, p: unknown, next: () => Promise<unknown>) => Promise<{ kind: string }> })
++      .waterfall('tools/pre-execute', { name, arguments: {}, agent }, async () => ({ kind: 'allow' }))
++    expect((await call('memory_write')).kind).toBe('allow') // до чтения — чисто
++    await call('read_docx')
++    expect(gate.taintedBy('s1')).toBe('read_docx')
++    const asked = await call('memory_write') as { kind: string, bypassPolicy?: boolean }
++    expect(asked.kind).toBe('ask')
++    expect(asked.bypassPolicy).toBe(true)
++    await (ctx as unknown as { serial: (n: string, p: unknown) => Promise<void> }).serial('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
++    expect((await call('memory_write')).kind).toBe('allow')
++    await ctx.fiber.dispose()
++  })
++})
++
++describe('дозапись хвоста на session/disposed', () => {
++  it('закрытие сессии с непросчитанными сообщениями запускает консолидацию', async () => {
++    const ctx = new Context()
++    ctx.provide('llm')
++    const prompts: string[] = []
++    ctx.set('llm', {
++      stream: (request: { messages: Array<{ content: Array<{ text: string }> }> }) => {
++        prompts.push(request.messages[0]!.content[0]!.text)
++        return (async function* () {
++          yield { type: 'block-start', index: 0, blockType: 'text' }
++          yield { type: 'text-delta', index: 0, text: '[]' }
++          yield { type: 'block-end', index: 0, block: { type: 'text', text: '[]' } }
++          yield { type: 'finish', reason: { kind: 'stop' } }
++        })()
++      },
++    })
++    const options: ConsolidationOptions = {
++      autoSummarize: true, autoSummarizeMaxMemories: 5, autoSummarizeMaxTokens: 256,
++      enableUserScope: true, minImportance: 0, autoSummarizeEveryTurns: 3,
++    }
++    const handle = registerConsolidation(ctx, new MemoryStore(root), options)
++    const session = { id: 's9', header: { cwd: '/work/p' } }
++    const agent = { session, options: { provider: 'p', model: 'm' } }
++    const emit = (name: string, ...args: unknown[]) => (ctx as unknown as { emit: (n: string, ...a: unknown[]) => void }).emit(name, ...args)
++    emit('session/event', session, { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Мы храним закупки в Postgres 16 и это важно' }] } })
++    await (ctx as unknown as { serial: (n: string, p: unknown) => Promise<void> }).serial('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
++    expect(prompts).toHaveLength(0) // 1 сообщение < порога 3
++    emit('session/disposed', session)
++    const deadline = Date.now() + 2000
++    while (prompts.length === 0 && Date.now() < deadline) await new Promise(r => setTimeout(r, 10))
++    await handle.flush()
++    expect(prompts).toHaveLength(1)
++    expect(prompts[0]).toContain('Postgres 16')
++    await ctx.fiber.dispose()
++  })
++})
+diff --git a/tests/multiuser.spec.ts b/tests/multiuser.spec.ts
+index aed2572..e76f294 100644
+--- a/tests/multiuser.spec.ts
++++ b/tests/multiuser.spec.ts
+@@ -20,7 +20,7 @@ const input = (name: string, body = `body of ${name}`) => ({ name, description:
+ 
+ beforeEach(async () => {
+   root = await fsp.mkdtemp(join(tmpdir(), 'dsh-mu-'))
+-  base = new MemoryStore(root, { admins: ['Boss@dkp'] })
++  base = new MemoryStore(root, { admins: ['boss@dkp'] })
+ })
+ afterEach(async () => {
+   await fsp.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+@@ -71,7 +71,7 @@ describe('общий слой и модерация', () => {
+ 
+   it('админ видит очередь, approve публикует всем, и запись попадает в индекс и инъекцию', async () => {
+     const alice = base.withOwner('alice')
+-    const admin = base.withOwner('boss@DKP') // регистр не важен
++    const admin = base.withOwner('boss@dkp')
+     await alice.write(input('rule-44fz'), 'shared')
+     expect((await admin.listPending()).map(r => r.name)).toEqual(['rule-44fz'])
+     expect((await admin.approve('rule-44fz'))?.status).toBe('verified')
+-- 
+2.43.0
+

@@ -290,27 +290,27 @@ export interface LifecycleMeta {
 }
 
 /**
- * 记忆是否可进入模型上下文(索引注入与按需召回共用同一口径):
- * 软停用 / disputed / superseded / 已过有效期 的一律隐藏(文件保留)。
+ * Может ли запись попасть в контекст модели (один критерий для инъекции индекса и recall по запросу):
+ * отключённые / disputed / superseded / с истёкшим сроком всегда скрыты (файл остаётся).
  */
 export function isInjectable(record: MemoryRecord, nowMs: number): boolean {
   return record.disabled !== true
     && record.status !== 'disputed'
     && record.status !== 'superseded'
-    // 共享层:未经管理员审核的候选对任何人都不进模型上下文(索引与召回同口径)——
-    // 否则一个员工写入的内容会未经审核注入所有同事(含管理员)的会话
+    // Общий слой: неодобренные админом кандидаты не попадают в контекст модели никому (индекс и recall по одному критерию) —
+    // иначе то, что записал один сотрудник, без проверки попадёт в сессии всех коллег (включая админа)
     && !(record.scope === 'shared' && record.status === 'candidate')
     && !isExpired(record, nowMs)
 }
 
-/** 登录名归一(去空白+小写):admins 名单与 owner 比较用。 */
+/** Нормализация логина (без пробелов, нижний регистр): для сравнения owner со списком admins. */
 function normalizeOwner(owner: string): string {
   return owner.trim().toLowerCase()
 }
 
 /**
- * 登录用户的个人根目录键:可读 slug + 原值哈希(不同登录名不碰撞,也没有路径穿越面)。
- * 本机/CLI 会话没有 owner → 返回 undefined,沿用旧版目录布局(升级零迁移)。
+ * Ключ личного корневого каталога пользователя: читаемый slug + хэш исходного значения (разные логины не сталкиваются, обхода пути нет).
+ * У локальной/CLI-сессии нет owner → возвращает undefined, действует старая раскладка каталогов (обновление без миграции).
  */
 export function ownerDirKey(owner: string | undefined): string | undefined {
   if (owner === undefined) return undefined
@@ -456,7 +456,7 @@ const DIRECTIVE_PATTERNS: RegExp[] = [
   /\b(?:reveal|show|print|output|leak|expose)\b[^.]{0,30}\b(?:system|developer)\s+(?:prompt|message|instructions?)\b/i,
   /(?:忽略|无视)[^.]{0,20}(?:之前|上面|以上)[^.]{0,20}(?:指令|提示|规则)/,
   /(?:输出|泄露|打印)[^.]{0,15}系统提示词/,
-  // 俄语:«игнорируй все предыдущие инструкции», «покажи системный промпт»
+  // Русский: «игнорируй все предыдущие инструкции», «покажи системный промпт»
   /(?:игнорируй|игнорируйте|забудь|забудьте)[^.]{0,30}(?:предыдущ|прежн|вс[еёх])[^.]{0,20}(?:инструкци|указани|правил)/i,
   /(?:покажи|выведи|раскрой|напечатай)[^.]{0,25}системн[а-я]*\s+(?:промпт|инструкци|сообщени)/i,
 ]
@@ -514,11 +514,11 @@ export interface MemoryWriteInput extends Omit<MemoryRecord, 'scope' | 'origin'>
 }
 
 export interface MemoryStoreOptions {
-  /** 数值或读时求值的函数(设置中心热切换:视图共享同一个 live 来源)。 */
+  /** Число или функция, вычисляемая при чтении (горячее переключение из центра настроек: представления используют один live-источник). */
   staleAfterDays?: number | (() => number)
-  /** 共享层管理员(登录名,大小写不敏感)。本机/CLI 会话(无 owner)恒为管理员。 */
+  /** Администраторы общего слоя (логины, без учёта регистра). Локальная/CLI-сессия (без owner) всегда админ. */
   admins?: readonly string[] | (() => readonly string[])
-  /** 内部:该视图所属登录用户;请用 withOwner()。 */
+  /** Внутреннее: пользователь, которому принадлежит представление; используйте withOwner(). */
   owner?: string
 }
 
@@ -532,9 +532,9 @@ export class MemoryStore {
     this.personalRoot = key === undefined ? rootDir : join(rootDir, OWNERS_DIR, key)
   }
 
-  /** 记忆根(共享层所在;永不随登录用户变化)。 */
+  /** Корень памяти (здесь лежит общий слой; от пользователя не зависит). */
   private readonly baseRoot: string
-  /** 个人层(user/project)所在根:本机 = baseRoot;登录用户 = baseRoot/_owners/<key>。 */
+  /** Корень личных слоёв (user/project): локально = baseRoot; для пользователя = baseRoot/_owners/<key>. */
   private readonly personalRoot: string
   /** 软淘汰阈值(天);0 = 禁用。索引重建时评估:陈旧零引用的记忆从索引隐藏(文件保留)。 */
   private readonly staleSource: number | (() => number)
@@ -542,13 +542,13 @@ export class MemoryStore {
   private get staleAfterDays(): number {
     return typeof this.staleSource === 'function' ? this.staleSource() : this.staleSource
   }
-  /** 该视图的登录用户;undefined = 本机/CLI。 */
+  /** Пользователь этого представления; undefined = локально/CLI. */
   readonly owner: string | undefined
 
   /**
-   * 某登录用户的存储视图(1.8.0 多用户):个人层(user/project)落在该用户自己的根下,
-   * 共享层仍是全员共用的 `_shared`。owner 为 undefined(CLI/无登录)返回本机视图,
-   * 目录布局与旧版完全一致。所有权限判定都在本类内(调用方无法绕过)。
+   * Представление хранилища для пользователя (многопользовательский режим, 1.8.0): личные слои (user/project) лежат в его собственном корне,
+   * общий слой по-прежнему общий для всех — `_shared`. Для owner === undefined (CLI/без логина) возвращается локальное представление,
+   * раскладка каталогов в точности как в старой версии. Все проверки прав — внутри этого класса (вызывающий код обойти их не может).
    */
   withOwner(owner: string | undefined): MemoryStore {
     if (owner === this.owner) return this
@@ -559,7 +559,7 @@ export class MemoryStore {
     })
   }
 
-  /** 是否共享层管理员:本机/CLI(无 owner)恒为是;登录用户须在 admins 名单内。 */
+  /** Админ ли общего слоя: локально/CLI (без owner) — всегда да; пользователь с логином должен быть в списке admins. */
   isAdmin(): boolean {
     if (this.owner === undefined) return true
     const list = typeof this.adminSource === 'function' ? this.adminSource() : this.adminSource
@@ -567,13 +567,13 @@ export class MemoryStore {
     return list.some(admin => normalizeOwner(admin) === me)
   }
 
-  /** 该视图可见性:共享层里别人的未审核候选只有管理员和作者本人能看到。 */
+  /** Видимость в этом представлении: чужих неодобренных кандидатов общего слоя видят только админ и сам автор. */
   private canSee(record: MemoryRecord): boolean {
     if (record.scope !== 'shared' || record.status !== 'candidate') return true
     return this.isAdmin() || (record.author !== undefined && record.author === this.owner)
   }
 
-  /** 共享层改/删权限:管理员任意;其他人只能动自己尚未审核通过的(候选/争议)记录。 */
+  /** Права на изменение/удаление в общем слое: админ — любые; остальные — только свои ещё не одобренные записи (кандидат/спорная). */
   private mayModifyShared(record: MemoryRecord): boolean {
     if (this.isAdmin()) return true
     return record.author !== undefined
@@ -582,8 +582,8 @@ export class MemoryStore {
   }
 
   /**
-   * 待审核队列(仅管理员):共享层里的候选与被指令扫描拦下的争议记录。
-   * 非管理员调用抛错——审核入口不对普通员工暴露。
+   * Очередь на модерацию (только админ): кандидаты общего слоя и спорные записи, остановленные проверкой на директивы.
+   * Вызов не-админом бросает ошибку — точка входа модерации обычным сотрудникам недоступна.
    */
   async listPending(): Promise<MemoryRecord[]> {
     if (!this.isAdmin()) throw new Error('only admins can review shared memories')
@@ -592,8 +592,8 @@ export class MemoryStore {
   }
 
   /**
-   * 管理员批准共享候选 → verified(此后进入全员索引/召回)。锁内重新解析,仅管理员。
-   * 返回批准后的记录;不存在返回 null。
+   * Админ одобряет общего кандидата → verified (затем он попадает в индекс/recall для всех). Запись заново разбирается под блокировкой; только админ.
+   * Возвращает одобренную запись; если её нет — null.
    */
   async approve(name: string): Promise<MemoryRecord | null> {
     if (!this.isAdmin()) throw new Error('only admins can approve shared memories')
@@ -616,7 +616,7 @@ export class MemoryStore {
     return approved
   }
 
-  /** 管理员驳回共享候选(删除)。 */
+  /** Админ отклоняет общего кандидата (удаляет). */
   async reject(name: string): Promise<boolean> {
     if (!this.isAdmin()) throw new Error('only admins can reject shared memories')
     return this.delete(name, 'shared')
@@ -670,7 +670,7 @@ export class MemoryStore {
     return null
   }
 
-  /** 合并个人两层(用户级在前)的全部记忆;共享层请用 list('shared')。 */
+  /** Все записи двух личных слоёв (сначала user); для общего слоя используйте list('shared'). */
   async listAll(cwd?: string): Promise<MemoryRecord[]> {
     return [...await this.list('user'), ...await this.list('project', cwd)]
   }
@@ -698,7 +698,7 @@ export class MemoryStore {
       // 文件(审查 major:同名候选 create 路径会覆写 superseded 文件使其重新
       // 注入)——superseded 只能经用户面板 restore 离开
       if (record.onlyIfAbsent === true && existing !== null) return
-      // 共享层权限(单点,调用方无法绕过):非管理员只能新建,或改自己尚未审核通过的记录
+      // Права общего слоя (единая точка, вызывающий код обойти не может): не-админ может только создавать или менять свои ещё не одобренные записи
       const sharedNonAdmin = scope === 'shared' && !this.isAdmin()
       if (sharedNonAdmin && existing !== null && !this.mayModifyShared(existing)) {
         throw new Error(`shared memory "${record.name}" can only be changed by an admin (it is verified or belongs to another user)`)
@@ -714,7 +714,7 @@ export class MemoryStore {
       //   不被常规流量冲掉(审查 major:复述刷新剥验证)
       // - 注入扫描在 store 单点:body/description 命中指令注入模式 → disputed。
       //   只挂固化路径会被 memory_write 直写绕过(审查 major:guard 整体可绕)
-      // 非管理员写共享层:置顶/停用/重要度由管理员掌控(忽略入参,沿用既有值)
+      // Не-админ пишет в общий слой: закрепление/отключение/важность в руках админа (входные значения игнорируются, остаются прежние)
       const pinned = sharedNonAdmin ? existing?.pinned : (record.pinned ?? existing?.pinned)
       const disabled = sharedNonAdmin ? existing?.disabled : (record.disabled ?? existing?.disabled)
       const importance = sharedNonAdmin ? existing?.importance : (record.importance ?? existing?.importance)
@@ -734,8 +734,8 @@ export class MemoryStore {
       if (existing?.status === 'superseded' && record.status === 'candidate' && contentChanged) return
       let status = record.status ?? existing?.status
       if (sharedNonAdmin) {
-        // 审核制:无论入参如何,非管理员写入的共享记忆一律是候选(命中指令模式则 disputed),
-        // 且在管理员 approve 之前对所有人(含作者自己的模型上下文)不注入
+        // Модерация: что бы ни пришло на вход, общая запись не-админа всегда кандидат (при срабатывании шаблона директивы — disputed),
+        // и до approve админом она никому не инъектируется (включая контекст модели самого автора)
         status = detectDirectivePattern(body) === true || detectDirectivePattern(description) === true
           ? 'disputed'
           : 'candidate'
@@ -789,9 +789,9 @@ export class MemoryStore {
       }
       if (validUntil === undefined) delete next.validUntil // 哨兵 0/显式清除:键不落盘
       else next.validUntil = validUntil
-      // 作者盖章(仅共享层):沿用既有作者,新建取当前登录用户;入参里的 author 一律丢弃(不可伪造)
+      // Проставление автора (только общий слой): сохраняется прежний автор, у новой записи — текущий пользователь; author из входных данных всегда отбрасывается (подделать нельзя)
       delete next.author
-      // 非管理员写共享层:...fields 展开带入了入参里的置顶/停用/重要度,这里按上面算好的值(沿用既有)覆盖
+      // Не-админ пишет в общий слой: ...fields протащил закрепление/отключение/важность из входных данных, здесь перезаписываем уже вычисленными выше значениями (прежними)
       if (sharedNonAdmin) {
         delete next.pinned
         delete next.disabled

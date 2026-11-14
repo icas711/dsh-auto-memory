@@ -61,11 +61,11 @@ export interface ConsolidationOptions {
   autoSummarizeMaxMemories: number
   autoSummarizeMaxTokens: number
   enableUserScope: boolean
-  /** 1.8.0:允许固化产出 scope=shared 的候选(进入审核队列;缺省 = 允许)。 */
+  /** 1.8.0: разрешить консолидации предлагать кандидатов со scope=shared (попадают в очередь на одобрение; по умолчанию разрешено). */
   enableSharedScope?: boolean
   /** #17 候选有效分(importance ?? DEFAULT_IMPORTANCE[type])低于此值丢弃;0 禁用。 */
   minImportance: number
-  /** 1.7.0:每累计多少条新的用户消息,在回合边界(agent/turn-stopping)增量固化一次;缺省 3。 */
+  /** 1.7.0: через сколько новых пользовательских сообщений запускать инкрементальную консолидацию на границе хода (agent/turn-stopping); по умолчанию 3. */
   autoSummarizeEveryTurns?: number
 }
 
@@ -177,7 +177,7 @@ const GREETING_PATTERNS: RegExp[] = [
   /^(?:你好|您好|hi|hello|hey|早上好|晚上好|下午好)/i,
   /(?:谢谢|感谢|thanks|thank you|多谢|再见|晚安|回头见|bye)/i,
   /^(?:好的|嗯+|哦+|ok|okay|got it|明白|收到)[。.!!~s]*$/i,
-  // 俄语(\b 对西里尔无效,边界手写)
+  // русский (\b не работает с кириллицей, границы заданы вручную)
   /^(?:привет|здравствуй(?:те)?|добрый (?:день|вечер)|доброе утро|хай)/i,
   /(?:спасибо|благодарю|до свидания|до встречи|спокойной ночи|(?:^|[\s,.!])пока(?:$|[\s,.!]))/i,
   /^(?:ок|окей|ладно|хорошо|понял[аи]?|принято|ясно|угу|ага)[\s.!~]*$/i,
@@ -197,7 +197,7 @@ export function isChitchat(text: string): boolean {
   if (/[a-z][a-z0-9-]{2,}/i.test(stripped)) return false
   const cjkCount = (stripped.match(/[一-鿿]/g) ?? []).length
   if (cjkCount >= 6) return false
-  // 西里尔:剥掉问候后仍有 >=12 个字母即有实质内容(与 CJK 的长度门槛同思路,宁漏勿误)
+  // кириллица: если после удаления приветствия осталось >=12 букв, содержание значимое (тот же принцип, что и порог длины для CJK; лучше пропустить, чем ошибиться)
   const cyrCount = (stripped.match(/[а-яё]/gi) ?? []).length
   if (cyrCount >= 12) return false
   return true
@@ -218,8 +218,8 @@ export function sanitizeCandidate(raw: RawCandidate, enableUserScope: boolean, o
     const title = typeof raw.title === 'string' && raw.title.trim().length > 0 ? raw.title.trim().slice(0, 80) : undefined
     if (description.length === 0 || body.length === 0) return null
     const type = asMemoryType(String(raw.type ?? 'reference'))
-    // shared 只在部署开启时放行;关闭时降回 project(与 user 层同款降级,不丢事实)。
-    // 无论谁固化,共享候选恒为 candidate(下方 status),由管理员审核后才对全员生效
+    // shared допускается только при включённом слое; иначе откат в project (как и для слоя user, факт не теряется).
+    // кто бы ни консолидировал, общий кандидат всегда candidate (см. status ниже): для всех он вступает в силу только после одобрения админом
     const scope: MemoryScope = raw.scope === 'shared' && opts?.enableSharedScope !== false
       ? 'shared'
       : raw.scope === 'user' && enableUserScope ? 'user' : 'project'
@@ -326,17 +326,17 @@ ${transcript}
 
 interface SessionCapture {
   cwd: string | undefined
-  /** 滚动窗口:仅供注入侧取词集(getQueryText),与固化游标无关。 */
+  /** Скользящее окно: нужно только стороне инъекции для набора слов (getQueryText), к курсору консолидации не относится. */
   lines: string[]
-  /** 固化游标:自上次固化以来尚未处理的行(autoSummarize 开时才累积)。 */
+  /** Курсор консолидации: строки, не обработанные с прошлой консолидации (копятся только при включённом autoSummarize). */
   pending: string[]
-  /** pending 中新的真实用户消息数(触发阈值计数)。 */
+  /** Число новых настоящих пользовательских сообщений в pending (счётчик порога запуска). */
   pendingUsers: number
-  /** 该会话已有一次固化在途(同会话不并发,新内容留在 pending 等下一次)。 */
+  /** В этой сессии уже идёт консолидация (в одной сессии не параллелим, новое содержимое остаётся в pending до следующего раза). */
   busy: boolean
 }
 
-/** 固化需要的最小 agent 形状(真实 Agent 结构兼容)。 */
+/** Минимальная форма агента, нужная консолидации (совместима с настоящим Agent). */
 interface AgentLike {
   session: { id: NonNullable<GenerateOptions['sessionId']>, header: { cwd?: string, delegationDepth?: number, owner?: string } }
   options: { provider?: string, model?: string, subagentDepth?: number }
@@ -395,8 +395,8 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
   })
 
   /**
-   * 取走游标之后的新内容并在后台固化一次(1.7.0 增量)。前置条件不满足(子代理/无 cwd/
-   * 无路由/无 llm 服务/没有新的用户行)静默返回,缓冲原样保留。
+   * Забирает новое содержимое после курсора и один раз консолидирует его в фоне (инкрементально, 1.7.0). Если условия не выполнены (субагент / нет cwd /
+   * нет маршрута / нет сервиса llm / нет новых пользовательских строк), тихо выходит, буфер остаётся как есть.
    */
   const startConsolidation = (agent: AgentLike, cap: SessionCapture): void => {
     // 过滤 subagent:固化只针对根会话(child 的内容会在父会话流中体现)
@@ -405,7 +405,7 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
     const cwd = cap.cwd ?? agent.session.header.cwd
     const provider = agent.options.provider
     const model = agent.options.model
-    if (cwd === undefined || provider === undefined || model === undefined) return // 无路由信息,放弃(静默)
+    if (cwd === undefined || provider === undefined || model === undefined) return // нет информации о маршруте, отказ (тихо)
     // 机会式获取 llm 服务:autoSummarize 部署(base)必有;无服务的组合(如测试栈)静默跳过
     const llm = ctx.get('llm')
     if (llm === undefined) return
@@ -416,7 +416,7 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
     cap.pendingUsers = 0
     cap.busy = true
     const sessionId = agent.session.id
-    // 1.8.0:个人层按会话登录用户取视图;共享写入的权限/审核在 store 单点
+    // 1.8.0: личные слои берутся для логина владельца сессии; права и модерация записи в общий слой проверяются в одной точке — в store
     const store = baseStore.withOwner(ownerOf(agent))
     const allowShared = options.enableSharedScope !== false
     let ok = true
@@ -477,11 +477,11 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
           if (written >= options.autoSummarizeMaxMemories) break
           const candidate = sanitizeCandidate(raw, options.enableUserScope, { sessionId: sessionId, transcript: lines.join('\n\n'), enableSharedScope: allowShared })
           if (candidate === null) continue
-          // 单候选失败(共享层权限拒绝、锁/IO 错误)只跳过该条,不拖垮整批——
-          // 个人事实不应因一条共享候选被拒而丢失
+          // Сбой одного кандидата (отказ по правам общего слоя, ошибка блокировки/IO) пропускает только его и не ломает весь пакет —
+          // личные факты не должны пропадать из-за отклонённого общего кандидата
           try {
-          // 查重池按候选所在层划分:共享候选只与共享记忆比对,个人候选只与 user+project 比对
-          // (跨层同名/近义不得互相覆盖——个人内容绝不能因"相似"改写到全员可见层)
+          // Пул для поиска дублей делится по слою кандидата: общий кандидат сравнивается только с общими записями, личный — только с user+project
+          // (одноимённые/близкие записи разных слоёв не должны перезаписывать друг друга — личное содержимое ни при каком «сходстве» не должно переписываться в слой, видимый всем)
           const existingAll = candidate.scope === 'shared' ? await store.list('shared') : await store.listAll(cwd)
           // 同一性判定(0.7.0 更新替换语义):name 锚定/精确同名/描述复述 → 更新
           // 现有记忆(复用其 name/scope 与生命周期,覆写内容)而非跳过或并存;
@@ -575,14 +575,14 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
     void task.finally(() => {
       active.delete(task)
       cap.busy = false
-      // 失败(LLM 错误/截断/非 JSON)时把这一批放回游标前面,下次阈值到达再试;
-      // 不重置计数 → 持续故障时自然退避,不会每个回合都付费重试
+      // При сбое (ошибка LLM / обрезка / не JSON) возвращаем этот пакет перед курсором и пробуем снова при следующем достижении порога;
+      // счётчик не сбрасываем → при устойчивом сбое естественный backoff, платных повторов на каждом ходу нет
       if (!ok) cap.pending = [...lines, ...cap.pending].slice(-MAX_TURNS)
     })
   }
 
-  // 回合边界触发(durable 回合末,不阻塞:这里只启动后台任务,不 await)。
-  // dsh 没有"会话关闭"事件,长会话靠这里增量落盘。
+  // Запуск на границе хода (в конце durable-хода, без блокировки: здесь только стартует фоновая задача, без await).
+  // В dsh нет события «закрытие сессии», поэтому длинные сессии сохраняются инкрементально здесь.
   ctx.on('agent/turn-stopping', ({ agent }) => {
     if (!options.autoSummarize) return
     const cap = captures.get(agent.session.id)
@@ -593,12 +593,12 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
   ctx.on('agent/disposed', ({ agent }) => {
     const cap = captures.get(agent.session.id)
     if (cap === undefined) return
-    // 固化关:缓冲保留到 session/disposed(#18 词集源生命周期与固化解耦,不能在此取走)
+    // Консолидация выключена: буфер сохраняется до session/disposed (#18: жизненный цикл источника набора слов отделён от консолидации, забирать его здесь нельзя)
     if (!options.autoSummarize) return
-    // 无论是否固化都取走缓冲:subagent 的捕获也会在此清理,否则常驻进程
-    // 的 captures Map 随子代理会话无界增长(审查 major 修复)
+    // Буфер забираем независимо от консолидации: захват субагентов тоже чистится здесь, иначе в долгоживущем процессе
+    // Map captures неограниченно растёт вместе с сессиями субагентов (исправление по ревью, major)
     captures.delete(agent.session.id)
-    // best-effort 收尾:只处理游标之后尚未固化的尾巴(之前的已经在回合边界落盘)
+    // Завершение по возможности (best-effort): обрабатываем только хвост после курсора, ещё не консолидированный (остальное уже сохранено на границе хода)
     startConsolidation(agent, cap)
   })
 

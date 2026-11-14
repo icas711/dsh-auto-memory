@@ -351,6 +351,13 @@ into authenticated web sessions:
 - Limitation: the web memory panel has no identity yet — it operates on the local
   (admin) view, so it shows neither per-employee memory nor the shared review queue.
 
+## Ограничения (Limitations)
+
+Известные ограничения версий 1.7.0–1.9.0 — на русском, с чек-листом проверки на стенде:
+[docs/LIMITATIONS.ru.md](docs/LIMITATIONS.ru.md). Главное: плагин не проверен на живом dsh
+(только автотесты со стабами); веб-панель не знает личность пользователя; личность берётся из
+`session.header.owner` — без него сессия считается локальной и получает права админа.
+
 ## How it works (60 seconds)
 
 - **Write**: tool `execute` → name normalized to `[a-z0-9-]` (reserved names

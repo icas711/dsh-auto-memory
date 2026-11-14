@@ -42,26 +42,26 @@ export interface Config {
   autoSummarizeMaxMemories: number
   /** 固化模型调用的输出 token 上限。 */
   autoSummarizeMaxTokens: number
-  /** 1.7.0:每累计多少条新的用户消息,在回合边界增量固化一次(长会话没有"结束"时刻)。 */
+  /** 1.7.0: через сколько новых пользовательских сообщений запускать инкрементальную консолидацию на границе хода (у длинной сессии нет момента «завершения»). */
   autoSummarizeEveryTurns: number
   /** #17 固化价值门槛:候选有效分(importance ?? 类型缺省)低于此值直接丢弃,不落盘。 */
   minImportance: number
   /** P1:软淘汰阈值(天)——超过且从未被读取的记忆在索引重建时从注入索引隐藏(文件保留)。0 禁用。 */
   staleAfterDays: number
-  /** 1.7.0:按需召回——每条用户消息由一次独立 LLM 调用挑出相关记忆并追加到上下文尾部。 */
+  /** 1.7.0: recall по запросу — на каждое пользовательское сообщение отдельный вызов LLM выбирает релевантные записи и добавляет их в хвост контекста. */
   recall: boolean
-  /** 每条用户消息最多召回几条。 */
+  /** Сколько записей максимум возвращать на одно пользовательское сообщение. */
   recallMaxMemories: number
-  /** 召回消息的字节预算。 */
+  /** Бюджет в байтах для сообщения с recall. */
   recallMaxBytes: number
-  /** 选择器调用硬超时(毫秒),超时静默放弃本次召回。 */
+  /** Жёсткий таймаут вызова селектора (мс); по таймауту recall тихо пропускается. */
   recallTimeoutMs: number
-  /** 选择器专用 provider/model(须成对设置;留空 = 沿用会话模型)。 */
+  /** Отдельные provider/model для селектора (задавать парой; пусто = модель сессии). */
   recallProvider?: string
   recallModel?: string
-  /** 1.8.0:共享层管理员(登录名 = session.header.owner,大小写不敏感);本机/CLI 会话恒为管理员。 */
+  /** 1.8.0: администраторы общего слоя (логины = session.header.owner, без учёта регистра); локальная/CLI-сессия всегда админ. */
   admins: string[]
-  /** 1.8.0:是否启用全员共享层(_shared;非管理员写入需审核)。 */
+  /** 1.8.0: включён ли общий слой для всех (_shared; запись не-админов проходит модерацию). */
   enableSharedScope: boolean
   /** 1.9.0:фоновая уборка — слияние дублей (LLM подтверждает; старые помечаются superseded). */
   curate?: boolean
@@ -107,8 +107,8 @@ export function apply(ctx: Context, config: Config): void {
   const profileDefaults: Config = { ...config }
   const live: Config = { ...config }
   void loadSettings(rootDir).then(overrides => { Object.assign(live, overrides) })
-  // 1.8.0:staleAfterDays/admins 以读时求值函数传入——withOwner 派生的各用户视图
-  // 共享同一 live 来源(设置中心改动对所有视图即时生效)
+  // 1.8.0: staleAfterDays/admins передаются функциями, вычисляемыми при чтении, — представления по владельцам, получаемые через withOwner,
+  // используют один live-источник (изменения в центре настроек сразу действуют на все представления)
   const store = new MemoryStore(rootDir, {
     staleAfterDays: () => live.staleAfterDays,
     admins: () => live.admins,
@@ -159,7 +159,7 @@ export function apply(ctx: Context, config: Config): void {
   // 超预算时按相关性截断(词集由 audit 层冻结,KV-safe)
   // 1.4.0 修复(审查 major):传 live 而非冻结 config——设置中心改 maxBytes
   // 后注入预算立即生效(此前传 config 导致设置永不作用于注入路径,重启也不恢复)
-  // 1.7.0:按需召回(agent/pre-step 尾部追加,不动系统提示词 → KV 前缀稳定)
+  // 1.7.0: recall по запросу (добавление в хвост на agent/pre-step, системный промпт не трогаем → KV-префикс стабилен)
   const recall = registerRecall(ctx, store, live)
   const curation = registerCuration(ctx, store, live)
 

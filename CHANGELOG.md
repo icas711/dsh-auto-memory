@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 the [GitHub Releases](https://github.com/AskTheWay/dsh-auto-memory/releases)
 page (generated from this file at publish time).
 
+## [Unreleased]
+
+### Documentation
+- `docs/LIMITATIONS.ru.md`: known limitations of 1.7.0–1.9.0 (in Russian) and a pre-rollout checklist.
+- Code comments added in 1.7.0–1.9.0 translated to Russian.
+
 ## [1.9.0] - 2026-11-14
 
 Background cleanup: duplicate memories are merged automatically.

@@ -35,7 +35,7 @@ export function registerMemoryTools(
   baseStore: MemoryStore,
   config: { enableUserScope: boolean; enableSharedScope?: boolean },
 ): void {
-  /** 当前部署可访问的作用域(被配置禁用的层从一切路径剔除)。 */
+  /** Слои, доступные в текущем развёртывании (отключённые настройкой слои исключаются на всех путях). */
   const availableScopes = (): readonly MemoryScope[] => [
     ...(config.enableUserScope ? ['user' as const] : []),
     'project' as const,
@@ -152,7 +152,7 @@ export function registerMemoryTools(
         body: args.body.slice(0, 2000),
       }, scope, cwd)
       const operation: 'created' | 'updated' = existing === null || existing.scope !== scope ? 'created' : 'updated'
-      // 共享层非管理员写入 = 候选:回执明示"待审核",模型别当成已生效向用户保证
+      // Запись не-админа в общий слой = кандидат: в ответе явно указано «ожидает одобрения», чтобы модель не уверяла пользователя, что запись уже действует
       const heldForReview = scope === 'shared' && !store.isAdmin()
       return { name, operation, scope, pinned: (args.pinned ?? existing?.pinned) === true, ...(heldForReview ? { pendingReview: true } : {}), ...(secretHits > 0 ? { redacted: secretHits } : {}) }
     },
@@ -612,8 +612,8 @@ export function registerMemoryTools(
     if (exec.name === 'memory_delete_all') {
       return { kind: 'ask', reason: 'memory_delete_all permanently deletes every memory in scope' }
     }
-    // 共享层审核:模型自己批准/驳回不算数——必须管理员本人在审批弹窗里确认,
-    // 否则被注入的会话可以自我背书把恶意记忆推给全员
+    // Модерация общего слоя: одобрение/отклонение самой моделью не считается — админ должен лично подтвердить в окне подтверждения,
+    // иначе сессия, в которую внедрили инструкции, могла бы сама себя одобрить и протолкнуть вредоносную запись всем
     if (exec.name === 'memory_review') {
       const action = (exec.arguments as { action?: string } | null)?.action
       if (action === 'approve' || action === 'reject') {

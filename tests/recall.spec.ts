@@ -1,5 +1,5 @@
 /**
- * 1.7.0 按需召回:纯函数 + 召回器(替身选择器)+ 经 agent/pre-step 的挂载。
+ * 1.7.0 recall по запросу: чистые функции + recaller (с заглушкой селектора) + подключение через agent/pre-step.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'

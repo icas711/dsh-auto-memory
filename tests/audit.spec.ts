@@ -99,14 +99,14 @@ describe('registerInjectionAudit(按会话签名去重)', () => {
     await audit.flush()
     expect((await readAudit(base)).length).toBe(4)
   })
-  it('无记忆(cwd 无索引):注入仅含写入指导(不再是空串),且不写审计', async () => {
+  it('нет памяти (в cwd нет индекса): инъекция содержит только руководство по записи (больше не пустая строка), аудит не пишется', async () => {
     const audit = registerInjectionAudit(store, config, base)
     const text = audit.text('/nowhere', 's1')
     expect(text).toContain('(no memories saved yet)')
     expect(text).toContain('memory_write')
     expect(await readAudit(base)).toEqual([])
   })
-  it('无 cwd(裸组装)仍返回空串', () => {
+  it('без cwd (голая сборка) по-прежнему возвращается пустая строка', () => {
     const audit = registerInjectionAudit(store, config, base)
     expect(audit.text(undefined, 's1')).toBe('')
   })

@@ -86,7 +86,7 @@ export function renderMemoryIndexDetail(store: MemoryStore, config: Config, cwd:
   }
   const projectIndex = store.readIndexSync('project', cwd)
   if (projectIndex !== null) sections.push(`## Project memories\n\n${projectIndex}`)
-  // 1.8.0 共享层(全员 ДКП 知识):索引由 store 单点生成,已排除未审核候选/争议条目
+  // Общий слой, 1.8.0 (знания ДКП для всех): индекс строит store в одной точке, неодобренные кандидаты и спорные записи уже исключены
   if (config.enableSharedScope !== false) {
     const sharedIndex = store.readIndexSync('shared')
     if (sharedIndex !== null) sections.push(`## Shared team memories (verified by admins, read-only for you unless you are an admin)\n\n${sharedIndex}`)

@@ -269,7 +269,7 @@ export function registerInjectionAudit(
   const frozenQuery = new Map<string, string>()
   return {
     text: (cwd, sessionId, owner) => {
-    // 1.8.0:按会话登录用户取个人层视图(共享层对所有视图相同)
+    // 1.8.0: личные слои берутся для логина владельца сессии (общий слой одинаков для всех представлений)
     const view = store.withOwner(owner)
     let query = sessionId !== undefined ? frozenQuery.get(sessionId) : undefined
     let detail = renderMemoryIndexDetail(view, config, cwd, query)

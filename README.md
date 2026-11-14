@@ -272,8 +272,12 @@ snapshot. Stored as overrides in the memory root's `settings.json`
 | `maxBytes` | 1024–65536 | 4096 | per-request injection budget |
 | `minImportance` | 0–10 | 4 | consolidation value gate (0 = off) |
 | `staleAfterDays` | 0–3650 | 0 | soft-hide zero-read memories (0 = off) |
-| `autoSummarize` | on/off | false | consolidate durable facts on session end |
+| `autoSummarize` | on/off | **true** | background LLM files durable facts as the session goes |
 | `autoSummarizeMaxMemories` | 1–20 | 5 | cap per consolidation |
+| `autoSummarizeEveryTurns` | 1–20 | 3 | consolidate after this many new user messages (at the turn boundary) |
+| `recall` | on/off | true | per-message recall: a separate LLM call picks relevant memories and appends them to the context |
+| `recallMaxMemories` | 1–10 | 4 | memories attached per user message |
+| `recallMaxBytes` | 512–16384 | 3000 | byte budget of the recall message |
 
 **Profile config** — override in your profile's `cordis.patch.yml` (config
 replaces wholesale). This is where `memoryDir` and `enableUserScope` live,
@@ -285,9 +289,16 @@ and where the defaults the runtime layer falls back to come from:
     maxBytes: 4096          # injection budget (index + guidance + wrapper)
     memoryDir: D:/memories  # default: $DSH_HOME/memory
     enableUserScope: true   # false: user layer off on every path
-    autoSummarize: false         # true: on root-session end, a background LLM files durable new facts
+    autoSummarize: true          # background LLM files durable new facts (incremental, see below)
+    autoSummarizeEveryTurns: 3   # ...after every N new user messages, at the turn boundary
     autoSummarizeMaxMemories: 5  # cap per consolidation
     autoSummarizeMaxTokens: 2048 # consolidation output cap
+    recall: true                 # per-message recall via a separate LLM call (fail-open)
+    recallMaxMemories: 4         # memories attached per user message
+    recallMaxBytes: 3000         # byte budget of the recall message
+    recallTimeoutMs: 6000        # hard timeout of the selector call; on timeout the step runs unchanged
+    recallProvider: ''           # selector provider/model, set both to use a cheaper model;
+    recallModel: ''              # empty = the session's own model
     staleAfterDays: 0            # >0: soft-hide zero-read memories older than N days (files kept)
 ```
 

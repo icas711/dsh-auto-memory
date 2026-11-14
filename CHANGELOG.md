@@ -6,6 +6,42 @@ All notable changes to this project are documented here. The format follows
 the [GitHub Releases](https://github.com/AskTheWay/dsh-auto-memory/releases)
 page (generated from this file at publish time).
 
+## [1.7.0] - 2026-11-14
+
+Memory that is actually used and written without being asked, and that
+understands Russian.
+
+### Added
+
+- **Per-message recall** (`src/recall.ts`): an `agent/pre-step` listener picks
+  relevant memories for each new user message with a separate LLM call
+  (optionally a cheaper `recallProvider`/`recallModel`) and appends their
+  bodies as a `plugin/recall` user message after the step's messages. The
+  system prompt is untouched, so the KV prefix stays stable. Fail-open on
+  timeout/error/invalid output, per-session dedup, subagents skipped,
+  selector output validated against the candidate list.
+- **Incremental consolidation**: dsh has no session-close event, so
+  consolidation now starts at `agent/turn-stopping` after every
+  `autoSummarizeEveryTurns` (default 3) new user messages. A per-session cursor
+  means each run sees only new text; a failed batch is put back (the counter is
+  not reset, so a persistent failure backs off); one run in flight per session;
+  `agent/disposed` flushes the tail.
+- **Russian support**: the tokenizer treated Cyrillic as separators, so
+  relevance ranking, duplicate detection, `memory_search` and contradiction
+  detection were blind to Russian. Cyrillic now gets a light stem and a
+  stop-word list; Russian dates (`15.10.2026`, `15 октября 2026`) and units
+  (руб, лет, дн, шт, чел, ...) feed the contradiction detector; Russian
+  greetings are chit-chat; Russian prompt-injection phrasings are recognised.
+
+### Changed
+
+- **The write guidance is always injected**, even with an empty store (the
+  section used to vanish, so a fresh install never started writing memories).
+  Empty injections are not audited.
+- **`autoSummarize` now defaults to `true`.** Set it to `false` to keep the old
+  behaviour. Recall adds one small LLM call per user message; disable with
+  `recall: false` or point it at a cheap model.
+
 ## [1.6.0] - 2026-11-08
 
 ### Added

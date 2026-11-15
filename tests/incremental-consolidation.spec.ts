@@ -234,4 +234,88 @@ describe('инкрементальная консолидация', () => {
     expect(prompts).toHaveLength(1)
     expect(prompts[0]).toContain('сообщение до появления маршрута')
   })
+
+  describe('П.4: merge вместо скипа при прямой записи', () => {
+    /** Прямой вызов memory_write/memory_delete в ходе: tools/pre-execute waterfall c allow/deny. */
+    const directTool = async (name: 'memory_write' | 'memory_delete', target: string, decision: 'allow' | 'deny' = 'allow', id = 's1'): Promise<void> => {
+      await (ctx as unknown as { waterfall: (n: string, p: unknown, nx: () => Promise<unknown>) => Promise<unknown> }).waterfall(
+        'tools/pre-execute',
+        { name, arguments: { name: target }, agent: { session: { id } } },
+        async () => ({ kind: decision }),
+      )
+    }
+
+    it('диапазон с прямой записью НЕ скипается: LLM вызван, якорь в промпте, перекрывающийся факт доливается update-веткой', async () => {
+      handle = registerConsolidation(ctx, store, baseOptions)
+      // модель напрямую записала память в диапазоне
+      await directTool('memory_write', 'procurement-db')
+      for (const text of ['раз про закупки', 'два про сервер', 'три про деплой']) say(text)
+      // экстрактор «следует промпту»: перекрывающийся факт приходит с ТОЧНЫМ именем якоря
+      reply = prompt => {
+        expect(prompt).toContain('Merge anchors — memories the agent wrote DIRECTLY')
+        expect(prompt).toContain('procurement-db')
+        return candidate('procurement-db', 'раз про закупки')
+      }
+      await stopTurn()
+      expect(prompts).toHaveLength(1) // скипа нет: консолидация выполнена
+      // запись реально существует (напрямую записанная моделью — заглушка store.write в тесте
+      // не вызывалась, поэтому «якорь» создала консолидация update-веткой: дубля нет)
+      expect((await store.listAll(CWD)).map(r => r.name)).toContain('procurement-db')
+    })
+
+    it('guard: create-кандидат с именем якоря форсится в update, имя из прямых удалений не воскресает', async () => {
+      handle = registerConsolidation(ctx, store, baseOptions)
+      // существующая память-якорь (записана в хранилище заранее) + прямая запись того же имени в диапазоне
+      await store.write({ name: 'anchor-a', description: 'якорь A', type: 'project', body: 'старое тело A' }, 'project', CWD)
+      await directTool('memory_write', 'anchor-a')
+      await directTool('memory_delete', 'deleted-b')
+      for (const text of ['раз про закупки', 'два про сервер', 'три про деплой']) say(text)
+      // экстрактор «ошибается» как в худшем случае: create под именем якоря и воскрешение удалённого
+      reply = () => JSON.stringify([
+        { name: 'anchor-a', title: 'x', description: 'Описание совсем другое, не совпадающее с якорем', type: 'project', body: 'новое тело A', scope: 'project', importance: 7, evidence: 'раз про закупки' },
+        { name: 'deleted-b', title: 'y', description: 'Воскрешение удалённого', type: 'project', body: 'Факт deleted-b', scope: 'project', importance: 7, evidence: 'два про сервер' },
+      ])
+      await stopTurn()
+      const records = await store.listAll(CWD)
+      const anchor = records.find(r => r.name === 'anchor-a')
+      expect(anchor).toBeDefined()
+      expect(anchor?.body).toBe('новое тело A') // update по имени якоря: тело заменено, дубля нет
+      expect(records.filter(r => r.name === 'anchor-a')).toHaveLength(1)
+      expect(records.some(r => r.name === 'deleted-b')).toBe(false) // воскрешение заблокировано
+    })
+
+    it('deny-запись не считается якорем; сбой LLM возвращает якоря для повторного прогона', async () => {
+      handle = registerConsolidation(ctx, store, baseOptions)
+      await directTool('memory_write', 'denied-c', 'deny')
+      for (const text of ['раз про закупки', 'два про сервер', 'три про деплой']) say(text)
+      reply = prompt => {
+        expect(prompt).not.toContain('Merge anchors') // deny не попал в якоря
+        return 'это не JSON' // первый прогон падает
+      }
+      await stopTurn()
+      expect(prompts).toHaveLength(1)
+      // якоря «allow»-записей нет — и возвращать нечего; батч вернулся после сбоя
+      for (const text of ['четыре про сроки', 'пять про команду', 'шесть про релизы']) say(text)
+      reply = prompt => {
+        expect(prompt).not.toContain('Merge anchors')
+        return candidate('late-fact', 'четыре про сроки')
+      }
+      await stopTurn()
+      expect(prompts).toHaveLength(2)
+      expect((await store.listAll(CWD)).map(r => r.name)).toContain('late-fact')
+    })
+
+    it('изоляция сессий: прямая запись в чужой сессии не становится якорем', async () => {
+      handle = registerConsolidation(ctx, store, baseOptions)
+      await directTool('memory_write', 'other-session-fact', 'allow', 's-other')
+      for (const text of ['раз про закупки', 'два про сервер', 'три про деплой']) say(text)
+      reply = prompt => {
+        expect(prompt).not.toContain('Merge anchors')
+        expect(prompt).not.toContain('other-session-fact')
+        return '[]'
+      }
+      await stopTurn()
+      expect(prompts).toHaveLength(1)
+    })
+  })
 })

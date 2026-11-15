@@ -267,8 +267,25 @@ export function sanitizeCandidate(raw: RawCandidate, enableUserScope: boolean, o
  * 已记载的约束,避免把"代码注释用中文"这类稳定约束再固化成记忆(分诊规则:
  * 人写稳定约束→AGENTS.md,模型动态事实→记忆,同一事实只落一处)。
  */
-export function buildConsolidationPrompt(existingNames: string[], transcript: string, maxMemories: number, instructionsDigest?: string, allowShared = false): string {
+/** Якоря П.4: прямые записи/удаления диапазона — merge-якоря и запреты воскрешения имён. */
+export interface ConsolidationAnchors {
+  directWrites?: readonly string[]
+  directDeletes?: readonly string[]
+}
+
+export function buildConsolidationPrompt(existingNames: string[], transcript: string, maxMemories: number, instructionsDigest?: string, allowShared = false, anchors?: ConsolidationAnchors): string {
   const known = existingNames.length > 0 ? existingNames.join(', ') : '(none)'
+  const anchorsBlock = (anchors?.directWrites?.length ?? 0) === 0 && (anchors?.directDeletes?.length ?? 0) === 0
+    ? ''
+    : `${(anchors?.directWrites?.length ?? 0) > 0 ? `- Merge anchors — memories the agent wrote DIRECTLY during this range:
+  ${anchors!.directWrites!.join(', ')}.
+  If your extracted fact overlaps one of them, reuse that EXACT name (update),
+  never create a near-duplicate. If the fact contradicts one, still reuse the
+  name — the store resolves the supersede chain.
+` : ''}${(anchors?.directDeletes?.length ?? 0) > 0 ? `- Names deleted DIRECTLY during this range: ${anchors!.directDeletes!.join(', ')}.
+  Do NOT recreate them under the same name; a genuinely new fact gets a new
+  kebab-case name.
+` : ''}`
   const instructions = instructionsDigest !== undefined && instructionsDigest.trim().length > 0
     ? `The workspace instruction files below are ALREADY injected into every session of this
 user. NEVER persist anything they record — that would duplicate a constraint the user
@@ -294,7 +311,7 @@ ${instructions}- Persist: who the user is (role, expertise, durable preferences)
 - If a fact UPDATES an existing memory, output it with that memory's EXACT
   existing name — reusing the name replaces the old version; a new name
   creates a duplicate.
-- Output AT MOST ${maxMemories} items. If nothing is worth persisting, output [].
+${anchorsBlock}- Output AT MOST ${maxMemories} items. If nothing is worth persisting, output [].
 - "importance" is 1-10: 8-10 = identity/durable preferences, 5-7 = project facts
   worth keeping, 1-4 = marginal references. Be conservative, not everything is 9.
 - "validUntilDays" is an optional shelf life for time-sensitive facts ONLY
@@ -332,6 +349,10 @@ interface SessionCapture {
   pending: string[]
   /** Число новых настоящих пользовательских сообщений в pending (счётчик порога запуска). */
   pendingUsers: number
+  /** П.4: имена, записанные напрямую (memory_write, decision allow) в диапазоне курсора — merge-якоря консолидации. */
+  directWrites: string[]
+  /** П.4: имена, удалённые напрямую (memory_delete, decision allow) в диапазоне — запрет воскрешения имени. */
+  directDeletes: string[]
   /** Последний агент сессии: нужен, чтобы дозафиксировать хвост на session/disposed (там агента уже нет). */
   lastAgent?: AgentLike
   /** В этой сессии уже идёт консолидация (в одной сессии не параллелим, новое содержимое остаётся в pending до следующего раза). */
@@ -370,7 +391,7 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
   const everyTurns = (): number => Math.max(1, Math.floor(options.autoSummarizeEveryTurns ?? 3))
 
   const record = (session: { id: string, header: { cwd?: string } }, line: string, isUser: boolean): void => {
-    const cap = captures.get(session.id) ?? { cwd: session.header.cwd, lines: [], pending: [], pendingUsers: 0, busy: false }
+    const cap = captures.get(session.id) ?? { cwd: session.header.cwd, lines: [], pending: [], pendingUsers: 0, directWrites: [], directDeletes: [], busy: false }
     cap.cwd = session.header.cwd ?? cap.cwd
     cap.lines = appendCapped(cap.lines, line)
     if (options.autoSummarize) {
@@ -379,6 +400,25 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
     }
     captures.set(session.id, cap)
   }
+
+  // П.4: прямые memory_write/memory_delete в ходе фиксируются как merge-якоря /
+  // запреты воскрешения имён для следующей консолидации (merge вместо скипа диапазона).
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    const decision = await next()
+    if (decision.kind !== 'allow') return decision
+    if (!options.autoSummarize) return decision
+    if (exec.name !== 'memory_write' && exec.name !== 'memory_delete') return decision
+    const sessionId = String((exec as unknown as { agent?: { session?: { id?: unknown } } }).agent?.session?.id ?? '')
+    if (sessionId.length === 0) return decision
+    const target = String((exec as unknown as { arguments?: { name?: unknown } }).arguments?.name ?? '')
+      .trim()
+    if (target.length === 0) return decision
+    const cap = captures.get(sessionId) ?? { cwd: undefined, lines: [], pending: [], pendingUsers: 0, directWrites: [], directDeletes: [], busy: false }
+    const list = exec.name === 'memory_write' ? cap.directWrites : cap.directDeletes
+    if (!list.includes(target) && list.length < 20) list.push(target) // дедуп, cap 20
+    captures.set(sessionId, cap)
+    return decision
+  })
 
   ctx.on('session/event', (session, event) => {
     if (event.type === 'user/message') {
@@ -417,6 +457,11 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
     cap.pending = []
     cap.pendingUsers = 0
     cap.busy = true
+    // П.4: merge-якоря диапазона (забираем как pending; при сбое — вернуть)
+    const anchorWrites = [...cap.directWrites]
+    const anchorDeletes = [...cap.directDeletes]
+    cap.directWrites = []
+    cap.directDeletes = []
     const sessionId = agent.session.id
     // 1.8.0: личные слои берутся для логина владельца сессии; права и модерация записи в общий слой проверяются в одной точке — в store
     const store = baseStore.withOwner(ownerOf(agent))
@@ -435,6 +480,7 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
           options.autoSummarizeMaxMemories,
           digest,
           allowShared,
+          { directWrites: anchorWrites, directDeletes: anchorDeletes },
         )
         const assembler = new BlockAssembler()
         const request: GenerateOptions = {
@@ -491,7 +537,21 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
           // #17 价值门槛:update 命中豁免(echo 复述刷新 recency 锚,拦掉会
           // 加速既有记忆衰减);create 才按有效分/闲聊过滤——判定复用同一
           // decision(审查 minor:每候选重复跑两次 decideConsolidationAction)
-          const decision = decideConsolidationAction(candidate, existingAll)
+          let decision = decideConsolidationAction(candidate, existingAll)
+          // П.4: детерминированный guard поверх промпта.
+          // create с именем merge-якоря форсится в update-ветку (reuse имени, дубля нет);
+          // имя из прямых удалений не воскрешается (skip с логом).
+          if (anchorWrites.includes(candidate.name)) {
+            const anchor = existingAll.find(record => record.name === candidate.name && record.status !== 'superseded')
+            if (anchor !== undefined) {
+              ctx.logger.debug(`[dsh-auto-memory] consolidation merge-anchor: ${candidate.name}`)
+              decision = { action: 'update', target: anchor, basis: 'exact-name' }
+            }
+          }
+          if (anchorDeletes.includes(candidate.name)) {
+            ctx.logger.info(`[dsh-auto-memory] consolidation resurrect-blocked: ${candidate.name}`)
+            continue
+          }
           if (decision.action === 'create') {
             const effectiveImportance = candidate.importance ?? DEFAULT_IMPORTANCE[candidate.type]
             if (effectiveImportance < options.minImportance) continue
@@ -568,6 +628,9 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
           }
         }
         if (written > 0) ctx.logger.info(`[dsh-auto-memory] consolidated ${written} memor${written === 1 ? 'y' : 'ies'}`)
+        if (anchorWrites.length > 0 || anchorDeletes.length > 0) {
+          ctx.logger.debug(`[dsh-auto-memory] consolidation merge anchors: ${String(anchorWrites.length)} written, ${String(anchorDeletes.length)} deleted`)
+        }
       } catch (error) {
         ctx.logger.warn(`[dsh-auto-memory] consolidation failed: ${String(error)}`)
         ok = false
@@ -578,8 +641,13 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
       active.delete(task)
       cap.busy = false
       // При сбое (ошибка LLM / обрезка / не JSON) возвращаем этот пакет перед курсором и пробуем снова при следующем достижении порога;
-      // счётчик не сбрасываем → при устойчивом сбое естественный backoff, платных повторов на каждом ходу нет
-      if (!ok) cap.pending = [...lines, ...cap.pending].slice(-MAX_TURNS)
+      // счётчик не сбрасываем → при устойчивом сбое естественный backoff, платных повторов на каждом ходу нет.
+      // П.4: merge-якоря возвращаются тоже — повторный merge идемпотентен (update по имени дубля не создаст)
+      if (!ok) {
+        cap.pending = [...lines, ...cap.pending].slice(-MAX_TURNS)
+        cap.directWrites = [...new Set([...anchorWrites, ...cap.directWrites])].slice(0, 20)
+        cap.directDeletes = [...new Set([...anchorDeletes, ...cap.directDeletes])].slice(0, 20)
+      }
     })
   }
 

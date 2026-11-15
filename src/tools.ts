@@ -17,6 +17,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore } from './store.ts'
 import { ownerOf } from './owner.ts'
 import { askHuman } from './ask.ts'
+import { MEMORY_BODY_MAX_CHARS } from './types.ts'
 import { normalizeName, memoryScore, DEFAULT_IMPORTANCE, detectSecrets, isExpired } from './store.ts'
 import { descriptionCoverage } from './matching.ts'
 import { expandLinks } from './links.ts'
@@ -93,7 +94,7 @@ export function registerMemoryTools(
       },
       body: {
         type: 'string', required: true,
-        description: 'The fact itself, in markdown. Cross-link with [[other-name]]. feedback type: end with **Why:** and **How to apply:** lines',
+        description: `The fact itself, in markdown, at most ${String(MEMORY_BODY_MAX_CHARS)} characters (longer is rejected, nothing is saved — summarize, or split into several linked memories). Cross-link with [[other-name]]. feedback type: end with **Why:** and **How to apply:** lines`,
       },
       title: {
         type: 'string',
@@ -153,6 +154,14 @@ export function registerMemoryTools(
           : Number.isSafeInteger(days) && days >= 1 && days <= 3650
             ? Date.now() + days * 86_400_000
             : undefined
+      // Явная ошибка вместо тихой обрезки: иначе модель уверяет пользователя, что «полный текст сохранён»
+      if (args.body.length > MEMORY_BODY_MAX_CHARS) {
+        throw new Error(
+          `body is ${String(args.body.length)} characters, the limit is ${String(MEMORY_BODY_MAX_CHARS)}; nothing was saved. `
+          + 'Memory holds distilled facts, not documents: summarize the content, or split it into several memories '
+          + '(one per section, cross-linked with [[name]]), and tell the user honestly what was kept.',
+        )
+      }
       await store.write({
         name,
         title: args.title !== undefined && args.title.trim().length > 0 ? args.title.trim().slice(0, 80) : undefined,
@@ -161,7 +170,7 @@ export function registerMemoryTools(
         ...(validUntil !== undefined ? { validUntil } : {}),
         description: args.description.trim().slice(0, 160),
         type: args.type,
-        body: args.body.slice(0, 2000),
+        body: args.body,
       }, scope, cwd)
       const operation: 'created' | 'updated' = existing === null || existing.scope !== scope ? 'created' : 'updated'
       // Запись не-админа в общий слой = кандидат: в ответе явно указано «ожидает одобрения», чтобы модель не уверяла пользователя, что запись уже действует

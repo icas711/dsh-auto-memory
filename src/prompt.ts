@@ -18,6 +18,7 @@
 import type { MemoryStore } from './store.ts'
 import type { Config } from './index.ts'
 import { descriptionCoverage } from './matching.ts'
+import { MEMORY_BODY_MAX_CHARS } from './types.ts'
 
 /** 唯一注入段(索引 + 指导合一)。 */
 export const MEMORY_SECTION = 'memory:index'
@@ -191,6 +192,12 @@ Rules:
 - Do not store what the codebase, AGENTS.md/CLAUDE.md, or project docs already record.
 - Stable constraints live in the injected AGENTS.md/CLAUDE.md instruction chain,
   maintained by the user by hand — never duplicate them into memories.
+- Memory holds distilled facts, not documents. A memory body is limited to ${String(MEMORY_BODY_MAX_CHARS)}
+  characters and a longer one is rejected: summarize it or split it into several
+  cross-linked memories, and never tell the user the full text was saved unless it was.
+- Scope: project memories are visible only in the current workspace. Facts that matter
+  in every workspace (about the user, their organisation, documents they keep coming
+  back to) belong in scope user.
 - Cross-link related memories with [[name]] in the body.
 - Pin a memory (pinned: true) only when the user explicitly asks to keep it
   forever — pinned entries lead the index, survive truncation and eviction.

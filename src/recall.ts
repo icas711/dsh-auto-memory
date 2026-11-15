@@ -33,6 +33,7 @@ import type { MemoryStore } from './store.ts'
 import { isInjectable, stripMemoryTags } from './store.ts'
 import { ownerOf } from './owner.ts'
 import { descriptionCoverage } from './matching.ts'
+import { humanAge, stalenessNote } from './age.ts'
 import type { MemoryRecord } from './types.ts'
 
 /** Настройки recall (подмножество Config из index.ts; читаются через live-объект, изменения на лету действуют со следующего сообщения). */
@@ -162,7 +163,8 @@ function byteLength(text: string): number {
   return Buffer.byteLength(text, 'utf8')
 }
 
-function dateOf(ms: number | undefined): string {
+/** ISO-дата для логов/аудита; из рендера recall ушла (П.1: вместо неё humanAge). */
+export function dateOf(ms: number | undefined): string {
   return ms === undefined ? '' : new Date(ms).toISOString().slice(0, 10)
 }
 
@@ -184,20 +186,27 @@ export function renderRecallBlock(records: readonly MemoryRecord[], maxBytes: nu
   const parts: string[] = []
   const included: MemoryRecord[] = []
   for (const record of records) {
-    const updated = dateOf(record.updatedMs ?? record.createdMs)
+    // П.1: человеческий возраст в заголовке + caveat-строка после тела (байты — в общем бюджете блока)
+    const updatedMs = record.updatedMs ?? record.createdMs
+    const updated = humanAge(updatedMs)
     const header = `### ${stripMemoryTags(record.title ?? record.name)} (${record.type}, ${record.scope}${record.workspace !== undefined ? `, из другой области: ${originLabel(record.workspace)}` : ''}${updated.length > 0 ? `, updated ${updated}` : ''})\n`
     let body = stripMemoryTags(record.body.trim())
     if (body.length > BODY_MAX_CHARS) body = `${body.slice(0, BODY_MAX_CHARS)}…`
-    let block = `${header}${body}`
+    const noteSuffix = (() => {
+      const note = stalenessNote(updatedMs)
+      return note.length > 0 ? `\n${note}` : ''
+    })()
+    let block = `${header}${body}${noteSuffix}`
     const sep = parts.length > 0 ? 2 : 0
     if (used + sep + byteLength(block) > maxBytes) {
-      // если оставшегося бюджета хватает на осмысленную выдержку — обрезаем эту запись, иначе останавливаемся
-      const room = maxBytes - used - sep - byteLength(header) - 3
+      // если оставшегося бюджета хватает на осмысленную выдержку — обрезаем эту запись, иначе останавливаемся;
+      // байты note вычитаются из room: caveat выживает при обрезке, бюджет не превышается (принцип 3)
+      const room = maxBytes - used - sep - byteLength(header) - 3 - byteLength(noteSuffix)
       if (room < 200) break
       let cut = body.slice(0, Math.floor(room / 3))
       while (byteLength(cut) > room && cut.length > 0) cut = cut.slice(0, -10)
       if (cut.length < 80) break
-      block = `${header}${cut}…`
+      block = `${header}${cut}…${noteSuffix}`
     }
     used += sep + byteLength(block)
     parts.push(block)

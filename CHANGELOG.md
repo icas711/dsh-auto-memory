@@ -32,6 +32,9 @@ Hardening for the multi-user web build (replacing the built-in memory).
 
 ## [Unreleased]
 
+### Added (v1.12)
+- П.1: human memory age in recall — header shows `updated today / yesterday / N days ago` instead of an ISO date, and memories older than a day carry a one-line caveat `(This memory is N days old — verify before relying on it.)`; caveat bytes count against the recall block budget (new `src/age.ts`, pure functions).
+
 ### Documentation
 - `docs/LIMITATIONS.ru.md`: known limitations of 1.7.0–1.9.0 (in Russian) and a pre-rollout checklist.
 - Code comments added in 1.7.0–1.9.0 translated to Russian.

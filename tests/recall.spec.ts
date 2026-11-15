@@ -14,6 +14,7 @@ import * as autoMemory from '../src/index.ts'
 import {
   buildSelectorPrompt, createRecaller, latestUserText, parseSelection, registerRecall, renderRecallBlock, shortlist,
 } from '../src/recall.ts'
+import { ageDays, humanAge, stalenessNote } from '../src/age.ts'
 import type { RecallAgent, RecallOptions, RecallSelector } from '../src/recall.ts'
 import type { MemoryRecord } from '../src/types.ts'
 
@@ -76,14 +77,56 @@ describe('parseSelection', () => {
   })
 })
 
+describe('age: человеческий возраст (П.1)', () => {
+  const DAY = 86_400_000
+  const now = Date.UTC(2026, 10, 15) // фиксированные «часы» — детерминированно без fake timers
+  it('ageDays: floor, будущее → 0, undefined → 0', () => {
+    expect(ageDays(now - 2 * DAY, now)).toBe(2)
+    expect(ageDays(now - 47 * DAY - 1000, now)).toBe(47)
+    expect(ageDays(now + DAY, now)).toBe(0)
+    expect(ageDays(undefined, now)).toBe(0)
+  })
+  it('humanAge: today / yesterday / N days ago; undefined → пусто', () => {
+    expect(humanAge(now, now)).toBe('today')
+    expect(humanAge(now - DAY, now)).toBe('yesterday')
+    expect(humanAge(now - 47 * DAY, now)).toBe('47 days ago')
+    expect(humanAge(now + DAY, now)).toBe('today') // clamp негативного возраста
+    expect(humanAge(undefined, now)).toBe('')
+  })
+  it('stalenessNote: пусто для ≤1 дня и undefined, caveat для старых', () => {
+    expect(stalenessNote(now, now)).toBe('')
+    expect(stalenessNote(now - DAY, now)).toBe('')
+    expect(stalenessNote(undefined, now)).toBe('')
+    expect(stalenessNote(now - 2 * DAY, now)).toBe('(This memory is 2 days old — verify before relying on it.)')
+    expect(stalenessNote(now - 47 * DAY, now)).toBe('(This memory is 47 days old — verify before relying on it.)')
+  })
+})
+
 describe('renderRecallBlock', () => {
-  it('оборачивает в протокольную оболочку и содержит тела', () => {
-    const { text, included } = renderRecallBlock([rec({ name: 'a', title: 'Заголовок', body: 'Тело записи', updatedMs: Date.UTC(2026, 10, 13) })], 3000)
+  it('оборачивает в протокольную оболочку и содержит тела; П.1: человеческий возраст вместо ISO', () => {
+    const { text, included } = renderRecallBlock([rec({ name: 'a', title: 'Заголовок', body: 'Тело записи', updatedMs: Date.now() })], 3000)
     expect(text.startsWith('<memory_recall>')).toBe(true)
     expect(text.endsWith('</memory_recall>')).toBe(true)
-    expect(text).toContain('### Заголовок (user, user, updated 2026-11-13)')
+    expect(text).toContain('### Заголовок (user, user, updated today)')
+    expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}/) // ISO-дат в рендере больше нет
     expect(text).toContain('Тело записи')
     expect(included).toHaveLength(1)
+  })
+  it('П.1: caveat для записи старше суток, отсутствие для свежих', () => {
+    const DAY = 86_400_000
+    const { text } = renderRecallBlock([rec({ body: 'старая запись', updatedMs: Date.now() - 47 * DAY })], 3000)
+    expect(text).toContain('updated 47 days ago')
+    expect(text).toContain('(This memory is 47 days old — verify before relying on it.)')
+    const fresh = renderRecallBlock([rec({ body: 'свежая запись', updatedMs: Date.now() })], 3000).text
+    expect(fresh).toContain('updated today')
+    expect(fresh).not.toContain('verify before relying')
+  })
+  it('П.1: байты caveat входят в бюджет — блок обрезается вместе с note, note выживает', () => {
+    const DAY = 86_400_000
+    const old = rec({ name: 'old', body: 'слово '.repeat(400), updatedMs: Date.now() - 30 * DAY })
+    const { text } = renderRecallBlock([old], 900)
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(900)
+    expect(text).toContain('verify before relying')
   })
   it('соблюдает байтовый бюджет', () => {
     const big = rec({ name: 'big', body: 'слово '.repeat(400) })

@@ -34,16 +34,18 @@ export const SETTABLE_FIELDS = {
   recallMaxMemories: { kind: 'number', min: 1, max: 10, step: 1 },
   recallMaxBytes: { kind: 'number', min: 512, max: 16_384, step: 256 },
   recallSessionMaxBytes: { kind: 'number', min: 0, max: 65_536, step: 512 },
+  injectionGate: { kind: 'enum', values: ['candidate', 'ask', 'off'] } as const,
 } as const
 
 export type SettableField = keyof typeof SETTABLE_FIELDS
 /** 用户覆盖的形状(全部可选;只存与 profile 不同的项也行,存了就生效)。 */
-export type SettingsOverrides = Partial<Record<SettableField, number | boolean>>
+export type SettingsOverrides = Partial<Record<SettableField, number | boolean | string>>
 
 /** 单字段校验:类型与范围都合法才收;畸形静默丢弃。 */
-function validateField(field: SettableField, value: unknown): number | boolean | undefined {
+function validateField(field: SettableField, value: unknown): number | boolean | string | undefined {
   const spec = SETTABLE_FIELDS[field]
   if (spec.kind === 'boolean') return typeof value === 'boolean' ? value : undefined
+  if (spec.kind === 'enum') return typeof value === 'string' && (spec.values as readonly string[]).includes(value) ? value : undefined
   if (typeof value !== 'number' || !Number.isSafeInteger(value)) return undefined
   if (value < spec.min || value > spec.max) return undefined
   return value
@@ -101,7 +103,7 @@ export async function applySettings(rootDir: string, patch: Record<string, unkno
     for (const key of Object.keys(SETTABLE_FIELDS) as SettableField[]) {
       if (patch[key] === null) { delete next[key]; continue }
       const value = validateField(key, patch[key])
-      if (value !== undefined) next[key] = value as number | boolean
+      if (value !== undefined) next[key] = value as number | boolean | string
     }
     await fsp.mkdir(rootDir, { recursive: true })
     await writeFileAtomic(file, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })

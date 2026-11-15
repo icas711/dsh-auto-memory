@@ -75,8 +75,8 @@ export interface Config {
   curateMaxMerges?: number
   /** 1.11.0: recall подмешивает project-память других рабочих областей владельца. */
   recallOtherProjects?: boolean
-  /** 1.10.0: гейт инъекций — memory_write после чтения внешнего контента идёт через подтверждение человека. */
-  injectionGate?: boolean
+  /** П.9 (v1.12): режим гейта инъекций — 'candidate' (тихо, статус candidate + метка untrusted) | 'ask' (подтверждение человека) | 'off'. Старые boolean мигрируют: true → 'ask', false → 'off'. */
+  injectionGate?: 'candidate' | 'ask' | 'off' | boolean
   /** Маски имён инструментов, чтение которых «заражает» ход (пусто = набор по умолчанию). */
   untrustedTools?: string[]
   /** П.6 (v1.12): верификация путей (claim-verify) в авто-создаваемых project/reference памяти. */
@@ -106,7 +106,7 @@ export const Config: z<Config> = z.object({
   curateIntervalHours: z.number().default(24),
   curateMaxMerges: z.number().default(3),
   recallOtherProjects: z.boolean().default(true),
-  injectionGate: z.boolean().default(true),
+  injectionGate: z.union([z.const('candidate'), z.const('ask'), z.const('off'), z.boolean()]).default('candidate'),
   untrustedTools: z.array(z.string()).default([]),
   verifyWrites: z.boolean().default(true),
 })
@@ -135,9 +135,13 @@ export function apply(ctx: Context, config: Config): void {
   })
   const gate = registerInjectionGate(ctx, live)
 
-  registerMemoryTools(ctx, store, live)
-
-  // P2-2:Web 面板 API(宿主半路由)。connection 服务由 web-app 组合提供,
+  // П.9: tools получает живой режим гейта и метку заражения хода —
+  // тихая запись 'candidate' ставит статус candidate + untrusted + receipt
+  registerMemoryTools(ctx, store, {
+    ...live,
+    gate: () => live.injectionGate,
+    taintedBy: gate.taintedBy,
+  })  // P2-2:Web 面板 API(宿主半路由)。connection 服务由 web-app 组合提供,
   // 加载顺序晚于本插件——用 inject 回调等待服务就绪再注册(非 web 组合永不回调)。
   // 回调使用框架给的 fiber ctx 注册,依赖消失时路由 effect 随作用域自动回收。
   // 1.4.0:传 live 对象——预算/淘汰参数在设置变更后立即反映到面板

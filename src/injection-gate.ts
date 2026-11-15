@@ -1,8 +1,12 @@
 /**
  * Гейт против инъекций через память (замена штатного memory-policy): если в текущем ходу агент
- * читал недоверенный внешний контент (документы, веб, поиск), то `memory_write` в этом ходу идёт
- * только через подтверждение человека. Так текст из закупочной документации или страницы не может
- * молча прописать себе инструкции в постоянную память.
+ * читал недоверенный внешний контент (документы, веб, поиск), то `memory_write` в этом ходу
+ * обрабатывается по режиму gate (П.9, v1.12):
+ * - `'ask'` — только через подтверждение человека (прежнее поведение `injectionGate: true`);
+ * - `'candidate'` (по умолчанию) — тихий пропуск: запись сохраняется со статусом candidate
+ *   и меткой `untrusted: <tool>` (см. tools.ts), видна в health board для ревью; в headless
+ *   без ответчика запись больше не блокируется навсегда;
+ * - `'off'` — прежнее поведение `injectionGate: false` (и трекинг заражения выключен).
  *
  * Определение «недоверенного» инструмента — список имён/масок `untrustedTools` в конфиге
  * (`*` = любая подстрока; регистр не важен). Инструменты самой памяти (`memory_*`) никогда
@@ -12,9 +16,23 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { askHuman } from './ask.ts'
 
+/** Режимы гейта (П.9): тихая запись кандидатом / подтверждение человека / выключено. */
+export type GateMode = 'candidate' | 'ask' | 'off'
+
+/**
+ * Нормализация значения конфига: старые булевы `true → 'ask'`, `false → 'off'`;
+ * новое строковое перечисление проходит как есть; неизвестное значение → `'candidate'`.
+ */
+export function normalizeGateMode(value: unknown): GateMode {
+  if (value === true) return 'ask'
+  if (value === false) return 'off'
+  if (value === 'ask' || value === 'candidate' || value === 'off') return value
+  return 'candidate'
+}
+
 export interface InjectionGateOptions {
-  /** Включён ли гейт (по умолчанию да). */
-  injectionGate?: boolean
+  /** Режим гейта (П.9): 'candidate' (по умолчанию) | 'ask' | 'off'; принимаются и старые boolean. */
+  injectionGate?: GateMode | boolean
   /** Маски имён инструментов, чтение которых «заражает» ход. */
   untrustedTools?: string[]
 }
@@ -36,7 +54,7 @@ export function isUntrustedTool(name: string, patterns: readonly string[]): bool
 }
 
 export interface InjectionGateHandle {
-  /** Какой инструмент заразил ход (для тестов/отладки). */
+  /** Какой инструмент заразил ход (для тестов/отладки и для тихой метки candidate в tools.ts). */
   taintedBy: (sessionId: string) => string | undefined
   cleanup: (sessionId: string) => void
 }
@@ -45,16 +63,18 @@ export function registerInjectionGate(ctx: Context, options: InjectionGateOption
   const tainted = new Map<string, string>()
   const patterns = (): readonly string[] =>
     options.untrustedTools !== undefined && options.untrustedTools.length > 0 ? options.untrustedTools : DEFAULT_UNTRUSTED_TOOLS
+  const mode = (): GateMode => normalizeGateMode(options.injectionGate)
 
   ctx.on('tools/pre-execute', async (exec, next) => {
     const decision = await next()
     if (decision.kind !== 'allow') return decision
-    if (options.injectionGate === false) return decision
+    if (mode() === 'off') return decision // 'off': трекинг заражения выключен, поведение старого false
     const sessionId = String((exec as unknown as { agent?: { session?: { id?: unknown } } }).agent?.session?.id ?? '')
     if (sessionId.length === 0) return decision
     if (exec.name === 'memory_write') {
       const source = tainted.get(sessionId)
       if (source === undefined) return decision
+      if (mode() === 'candidate') return decision // тихий пропуск: метку ставит tools.ts в execute
       return askHuman(`memory_write после чтения внешнего контента (${source}): подтвердите, что запись исходит от вас, а не из текста документа/страницы`)
     }
     if (isUntrustedTool(exec.name, patterns())) tainted.set(sessionId, exec.name)

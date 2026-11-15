@@ -179,7 +179,7 @@ export function parseMemory(raw: string, scope: MemoryScope): MemoryRecord | nul
   try {
     const fm = parseFrontmatter(raw)
     if (!fm) return null
-    const { name, description, type, title, created, updated, lastRead, reads, pinned, importance, disabled, origin, status, evidence, supersededBy, supersedes, validUntil, author } = fm.data
+    const { name, description, type, title, created, updated, lastRead, reads, pinned, importance, disabled, origin, status, evidence, supersededBy, supersedes, validUntil, author, untrusted } = fm.data
     if (typeof name !== 'string' || typeof description !== 'string' || description.trim().length === 0) return null
     const parsedType = type === undefined ? 'reference' : asMemoryType(String(type))
     const asMs = (value: unknown): number | undefined =>
@@ -221,6 +221,8 @@ export function parseMemory(raw: string, scope: MemoryScope): MemoryRecord | nul
       ...(asMs(validUntil) !== undefined ? { validUntil: asMs(validUntil)! } : {}),
       ...(parsedOrigin !== undefined ? { origin: parsedOrigin } : {}),
       ...(typeof author === 'string' && author.trim().length > 0 ? { author: author.trim().slice(0, 128) } : {}),
+      // П.9: метка «записано после чтения недоверенного контента» (имя инструмента)
+      ...(typeof untrusted === 'string' && untrusted.trim().length > 0 ? { untrusted: untrusted.trim().slice(0, 64) } : {}),
       createdMs: asMs(created),
       updatedMs: asMs(updated),
       lastReadMs: asMs(lastRead),
@@ -260,6 +262,8 @@ export function serializeMemory(record: Omit<MemoryRecord, 'scope'>): string {
       },
     } : {}),
     ...(record.author !== undefined ? { author: record.author } : {}),
+    // П.9: метка источника «записано после чтения недоверенного контента»
+    ...(record.untrusted !== undefined ? { untrusted: record.untrusted } : {}),
     ...(record.createdMs !== undefined ? { created: record.createdMs } : {}),
     ...(record.updatedMs !== undefined ? { updated: record.updatedMs } : {}),
     ...(record.lastReadMs !== undefined ? { lastRead: record.lastReadMs } : {}),
@@ -843,6 +847,9 @@ export class MemoryStore {
       // 离开 superseded 态(显式传非 superseded 的 status)时清 supersededBy(链只活在被取代态)
       const supersededBy = status === 'superseded' ? (record.supersededBy ?? existing?.supersededBy) : undefined
       const supersedes = record.supersedes ?? existing?.supersedes
+      // П.9: метка untrusted наследуется при обновлениях (как supersedes) —
+      // echo-update/метаданные-записи не стирают факт «написано после чтения недоверенного контента»
+      const untrusted = record.untrusted ?? existing?.untrusted
       // 导入溯源:首次导入按清洗后内容算指纹;后续任何写入(工具/固化/面板
       // 置顶停用)原样继承首次指纹,绝不重算——指纹只标记"导入瞬间的内容",
       // 撤销时用它判定这条是否已被改过。内容更新不重算 ≠ 指纹失效,比对时
@@ -866,6 +873,7 @@ export class MemoryStore {
         ...(evidence !== undefined ? { evidence } : {}),
         ...(supersededBy !== undefined ? { supersededBy } : {}),
         ...(supersedes !== undefined ? { supersedes } : {}),
+        ...(untrusted !== undefined ? { untrusted } : {}),
         ...(title !== undefined ? { title: sanitizeContent(title) } : {}),
         description,
         body,

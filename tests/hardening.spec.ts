@@ -123,7 +123,8 @@ describe('гейт инъекций', () => {
 
   it('после чтения внешнего контента memory_write идёт через ask; в новом ходу — свободно', async () => {
     const ctx = new Context()
-    const gate = registerInjectionGate(ctx, { untrustedTools: ['read_doc*'] })
+    // П.9: режим 'ask' = прежнее поведение injectionGate: true
+    const gate = registerInjectionGate(ctx, { untrustedTools: ['read_doc*'], injectionGate: 'ask' })
     const agent = { session: { id: 's1' } }
     const call = (name: string) => (ctx as unknown as { waterfall: (n: string, p: unknown, next: () => Promise<unknown>) => Promise<{ kind: string }> })
       .waterfall('tools/pre-execute', { name, arguments: {}, agent }, async () => ({ kind: 'allow' }))

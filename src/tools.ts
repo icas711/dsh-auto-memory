@@ -17,6 +17,9 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore } from './store.ts'
 import { ownerOf } from './owner.ts'
 import { askHuman } from './ask.ts'
+import { normalizeGateMode } from './injection-gate.ts'
+import type { GateMode } from './injection-gate.ts'
+import { detectDirectivePattern } from './store.ts'
 import { MEMORY_BODY_MAX_CHARS } from './types.ts'
 import { normalizeName, memoryScore, DEFAULT_IMPORTANCE, detectSecrets, isExpired } from './store.ts'
 import { descriptionCoverage } from './matching.ts'
@@ -31,11 +34,20 @@ function parseExplicitScope(raw: string | undefined): MemoryScope | undefined {
 }
 
 /** 注册记忆工具。 */
-/** 注册记忆工具。enableUserScope 传**可变配置对象**(1.4.0 设置中心热切换;读时求值)。 */
+/** 注册记忆工具。enableUserScope 传**可变配置对象**(1.4.0 设置中心热切换;读时求值)。
+ *  П.9 (v1.12): gate/taintedBy опциональны — при режиме 'candidate' запись после чтения
+ *  недоверенного контента проходит тихо со статусом candidate и меткой untrusted. */
 export function registerMemoryTools(
   ctx: Context,
   baseStore: MemoryStore,
-  config: { enableUserScope: boolean; enableSharedScope?: boolean },
+  config: {
+    enableUserScope: boolean
+    enableSharedScope?: boolean
+    /** Режим гейта инъекций (живое значение); отсутствует = гейт не влияет на запись. */
+    gate?: () => GateMode
+    /** Чем «заражён» текущий ход сессии (имя инструмента) или undefined. */
+    taintedBy?: (sessionId: string) => string | undefined
+  },
 ): void {
   /** Слои, доступные в текущем развёртывании (отключённые настройкой слои исключаются на всех путях). */
   const availableScopes = (): readonly MemoryScope[] => [
@@ -128,14 +140,21 @@ export function registerMemoryTools(
           pinned: { type: 'boolean', required: true },
           pendingReview: { type: 'boolean' },
           redacted: { type: 'integer' },
+          untrusted: { type: 'string', description: 'П.9: present when written after reading untrusted content (gate mode candidate) — the tool that tainted the turn' },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: `Memory ${value.operation}: ${value.name} (${value.scope}${value.pinned ? ', pinned' : ''})${value.pendingReview === true ? ' — saved as a CANDIDATE: hidden from colleagues until an admin approves it' : ''}${(value.redacted ?? 0) > 0 ? ` — ⚠ ${String(value.redacted)} secret(s) detected and redacted; do not store credentials in memories` : ''}` }],
+      render: (_args, value) => [{ type: 'text', text: `Memory ${value.operation}: ${value.name} (${value.scope}${value.pinned ? ', pinned' : ''})${value.pendingReview === true ? ' — saved as a CANDIDATE: hidden from colleagues until an admin approves it' : ''}${(value.redacted ?? 0) > 0 ? ` — ⚠ ${String(value.redacted)} secret(s) detected and redacted; do not store credentials in memories` : ''}${value.untrusted !== undefined ? ` — ⚠ written after reading untrusted content (${String(value.untrusted)}); saved as candidate — review in Health` : ''}` }],
     },
     async execute(args, exec) {
       const store = viewFor(exec.agent)
       const cwd = requireCwd(exec.agent?.session.header.cwd)
       const name = normalizeName(args.name)
+      // П.9: тихий режим 'candidate' — запись после чтения недоверенного контента
+      // проходит без попапа: статус candidate + метка untrusted + receipt в результате
+      const sessionId = String(exec.agent?.session.id ?? '')
+      const taintedSource = config.taintedBy?.(sessionId)
+      const quietGate = taintedSource !== undefined && config.gate !== undefined && normalizeGateMode(config.gate()) === 'candidate'
+      const directiveHit = detectDirectivePattern(args.body) === true || detectDirectivePattern(args.description) === true
       // 未显式指定 scope:先在可访问层内查重,命中层即更新层;未命中落到 project
       const explicit = parseExplicitScope(args.scope)
       const existing = await store.findIn(name, availableScopes(), cwd)
@@ -171,11 +190,21 @@ export function registerMemoryTools(
         description: args.description.trim().slice(0, 160),
         type: args.type,
         body: args.body,
+        // П.9: тихая запись после недоверенного чтения — форс кандидата + источник.
+        // directive-паттерн в тексте: статус НЕ форсится — store.write понизит до
+        // disputed сам (жёсткая линия guard не ослабляется тихим режимом)
+        ...(quietGate && !directiveHit ? { status: 'candidate' as const, untrusted: taintedSource } : { ...(quietGate ? { untrusted: taintedSource } : {}) }),
       }, scope, cwd)
       const operation: 'created' | 'updated' = existing === null || existing.scope !== scope ? 'created' : 'updated'
       // Запись не-админа в общий слой = кандидат: в ответе явно указано «ожидает одобрения», чтобы модель не уверяла пользователя, что запись уже действует
       const heldForReview = scope === 'shared' && !store.isAdmin()
-      return { name, operation, scope, pinned: (args.pinned ?? existing?.pinned) === true, ...(heldForReview ? { pendingReview: true } : {}), ...(secretHits > 0 ? { redacted: secretHits } : {}) }
+      return {
+        name, operation, scope,
+        pinned: (args.pinned ?? existing?.pinned) === true,
+        ...(heldForReview ? { pendingReview: true } : {}),
+        ...(secretHits > 0 ? { redacted: secretHits } : {}),
+        ...(quietGate ? { untrusted: taintedSource } : {}),
+      }
     },
     presentCall: args => ({ card: 'generic', title: `Memory write: ${String(args.name)}`, kind: 'other', rawInput: args }),
   }))

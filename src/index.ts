@@ -24,7 +24,7 @@ import { ownerOf } from './owner.ts'
 import { registerCuration } from './curate.ts'
 import { registerDream } from './dream.ts'
 import { createIdentityBridge } from './identity.ts'
-import { registerInjectionGate } from './injection-gate.ts'
+import { normalizeGateMode, registerInjectionGate } from './injection-gate.ts'
 import { registerMemoryApi } from './memory-api.ts'
 import { loadSettings, applySettings, SETTABLE_FIELDS } from './settings.ts'
 
@@ -155,9 +155,11 @@ export function apply(ctx: Context, config: Config): void {
   // тихая запись 'candidate' ставит статус candidate + untrusted + receipt
   registerMemoryTools(ctx, store, {
     ...live,
-    gate: () => live.injectionGate,
+    gate: () => normalizeGateMode(live.injectionGate),
     taintedBy: gate.taintedBy,
-  })  // P2-2:Web 面板 API(宿主半路由)。connection 服务由 web-app 组合提供,
+  })
+
+  // P2-2:Web 面板 API(宿主半路由)。connection 服务由 web-app 组合提供,
   // 加载顺序晚于本插件——用 inject 回调等待服务就绪再注册(非 web 组合永不回调)。
   // 回调使用框架给的 fiber ctx 注册,依赖消失时路由 effect 随作用域自动回收。
   // 1.4.0:传 live 对象——预算/淘汰参数在设置变更后立即反映到面板

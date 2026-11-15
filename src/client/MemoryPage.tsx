@@ -82,7 +82,7 @@ function importKey(slug: string, file: string): string {
 
 /** 记忆体检响应形状(health.report,1.0.0;1.6.0 加 expired 榜)。 */
 interface HealthReportFace {
-  unverified: Array<{ name: string; scope: string; slug: string; hasEvidence: boolean }>
+  unverified: Array<{ name: string; scope: string; slug: string; hasEvidence: boolean; untrusted?: string }>
   zombies: Array<{ name: string; scope: string; slug: string; ageDays: number }>
   conflicts: Array<{ kind: 'cross-scope' | 'near-duplicate'; a: { name: string; scope: string }; b: { name: string; scope: string } }>
   expired: Array<{ name: string; scope: string; slug: string; expiredDays: number }>
@@ -90,8 +90,8 @@ interface HealthReportFace {
 
 /** 设置中心响应形状(config.get,1.4.0)。 */
 interface SettingsFace {
-  effective: Record<string, number | boolean>
-  overrides: Record<string, number | boolean>
+  effective: Record<string, number | boolean | string>
+  overrides: Record<string, number | boolean | string>
   sources: Record<string, string>
 }
 
@@ -257,7 +257,18 @@ function projectsFromTimeline(timeline: AuditStatsFace['timeline']): ProjectRow[
  * 1.5.0:并入独立体检 tab;每行可点 = 切回记忆 tab 并直达该卡片(onLocate)。
  * 1.6.0:第四榜「已过期」+ 行内一键续期 90 天(onRenew)。
  */
-function HealthSection({ health, t, onLocate, onRenew, busy }: { health: HealthReportFace; t: Translate; onLocate: (name: string) => void; onRenew: (target: { name: string; scope: string; slug: string }) => Promise<void>; busy: boolean }): ReactNode {
+function HealthSection({ health, t, onLocate, onRenew, busy, onStatus, onDelete }: {
+  health: HealthReportFace
+  t: Translate
+  onLocate: (name: string) => void
+  onRenew: (target: { name: string; scope: string; slug: string }) => Promise<void>
+  busy: boolean
+  /** П.9: verify/dispute записи «после недоверенного чтения» прямо из health board. */
+  onStatus: (target: { name: string; scope: string; slug: string }, status: 'verified' | 'disputed') => void
+  onDelete: (target: { name: string; scope: string; slug: string }) => void
+}): ReactNode {
+  // инлайн-подтверждение удаления (как у карточек в списке памяти)
+  const [confirmingKey, setConfirmingKey] = useState<string | null>(null)
   const scopeLabel = (scope: string): string => (scope === 'user' ? t('scopeUser') : t('scopeProject'))
   return (
     <section className="dam-stats">
@@ -278,19 +289,54 @@ function HealthSection({ health, t, onLocate, onRenew, busy }: { health: HealthR
         <div className="dam-block">
           <p className="dam-section">{t('healthUnverified')}</p>
           {health.unverified.length === 0 && <p className="dam-note">{t('healthNone')}</p>}
-          {health.unverified.map(m => (
-            <button
-              type="button"
-              key={`u-${m.scope}-${m.slug}-${m.name}`}
-              className="dam-health-row"
-              title={t('healthLocateTip')}
-              onClick={() => { onLocate(m.name) }}
-            >
-              <span className="dam-badge dam-badge--cand">? {t('statusCandidate')}</span>
-              <code title={m.name}>{m.name}</code>
-              <span className="dam-health-meta">{scopeLabel(m.scope)}{m.hasEvidence ? ' · 📎' : ''}</span>
-            </button>
-          ))}
+          {health.unverified.map(m => {
+            const rowKey = `u-${m.scope}-${m.slug}-${m.name}`
+            // П.9: «тихая» запись после недоверенного чтения — метка источника +
+            // one-click verify / dispute / delete (подтверждение только на delete)
+            if (m.untrusted === undefined) {
+              return (
+                <button
+                  type="button"
+                  key={rowKey}
+                  className="dam-health-row"
+                  title={t('healthLocateTip')}
+                  onClick={() => { onLocate(m.name) }}
+                >
+                  <span className="dam-badge dam-badge--cand">? {t('statusCandidate')}</span>
+                  <code title={m.name}>{m.name}</code>
+                  <span className="dam-health-meta">{scopeLabel(m.scope)}{m.hasEvidence ? ' · 📎' : ''}</span>
+                </button>
+              )
+            }
+            const target = { name: m.name, scope: m.scope, slug: m.slug }
+            return (
+              <span key={rowKey} className="dam-health-row">
+                <button
+                  type="button"
+                  className="dam-health-locate"
+                  title={t('untrustedTip')}
+                  onClick={() => { onLocate(m.name) }}
+                >
+                  <span className="dam-badge dam-badge--warn">⚠ {t('untrustedBadge', { name: m.untrusted })}</span>
+                  <code title={m.name}>{m.name}</code>
+                  <span className="dam-health-meta">{scopeLabel(m.scope)}{m.hasEvidence ? ' · 📎' : ''}</span>
+                </button>
+                {confirmingKey === rowKey ? (
+                  <>
+                    <span>{t('confirmDelete')}</span>
+                    <button type="button" className="dam-btn dam-btn-danger" disabled={busy} onClick={() => { setConfirmingKey(null); onDelete(target) }}>{t('delete')}</button>
+                    <button type="button" className="dam-btn" disabled={busy} onClick={() => { setConfirmingKey(null) }}>{t('cancel')}</button>
+                  </>
+                ) : (
+                  <>
+                    <button type="button" className="dam-btn dam-btn-primary" disabled={busy} title={t('untrustedTip')} onClick={() => { onStatus(target, 'verified') }}>{t('verifyAction')}</button>
+                    <button type="button" className="dam-btn" disabled={busy} onClick={() => { onStatus(target, 'disputed') }}>{t('disputeAction')}</button>
+                    <button type="button" className="dam-btn" disabled={busy} onClick={() => { setConfirmingKey(rowKey) }}>{t('delete')}</button>
+                  </>
+                )}
+              </span>
+            )
+          })}
         </div>
         <div className="dam-block">
           <p className="dam-section">{t('healthZombies')}</p>
@@ -1300,6 +1346,53 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
     }
   }
 
+  /**
+   * П.9 (v1.12): verify/dispute «тихой» записи (после недоверенного чтения) прямо
+   * из health board. Точная группа по scope+slug, read + write со статусом —
+   * как renewExpired; метка untrusted сохраняется наследованием в store.
+   * Проектные группы не текущего workspace — read-only (та же дисциплина).
+   */
+  const healthSetStatus = (target: { name: string; scope: string; slug: string }, status: 'verified' | 'disputed'): void => {
+    const group = groups?.find(g => g.scope === target.scope && g.slug === target.slug)
+    const memory = group?.memories.find(m => m.name === target.name)
+    if (group === undefined || memory === undefined) return
+    if (group.scope === 'project' && group.current !== true) {
+      setActionError(t('saveFailed'))
+      return
+    }
+    const owningCwd = cwd(group)
+    void (async () => {
+      try {
+        const full = await read({ name: target.name, scope: group.scope, ...(owningCwd !== undefined ? { cwd: owningCwd } : {}) })
+        await act(() => write({
+          ...(owningCwd !== undefined ? { cwd: owningCwd } : {}),
+          scope: group.scope,
+          name: target.name,
+          description: memory.description,
+          type: memory.type,
+          body: full.body,
+          ...(memory.pinned ? { pinned: true } : {}),
+          ...(memory.disabled ? { disabled: true } : {}),
+          status,
+        }))
+      } catch {
+        setActionError(t('saveFailed'))
+      }
+    })()
+  }
+
+  /** П.9: удаление «тихой» записи из health board (действие после инлайн-подтверждения). */
+  const healthDelete = (target: { name: string; scope: string; slug: string }): void => {
+    const group = groups?.find(g => g.scope === target.scope && g.slug === target.slug)
+    if (group === undefined) return
+    if (group.scope === 'project' && group.current !== true) {
+      setActionError(t('deleteFailed'))
+      return
+    }
+    const owningCwd = cwd(group)
+    void act(() => del({ ...(owningCwd !== undefined ? { cwd: owningCwd } : {}), scope: group.scope, name: target.name }))
+  }
+
   return (
     <div className="dam-root" ref={rootRef}>
       <div className="dam-shell">
@@ -1475,7 +1568,7 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
 
       <div className="dam-tabpane" data-on={activeTab === 'health' ? '1' : '0'}>
         {health !== null && showHealth && (
-          <HealthSection health={health} t={t} onLocate={jumpTo} onRenew={renewExpired} busy={busy} />
+          <HealthSection health={health} t={t} onLocate={jumpTo} onRenew={renewExpired} busy={busy} onStatus={healthSetStatus} onDelete={healthDelete} />
         )}
       </div>
 
@@ -1895,13 +1988,23 @@ function SettingsCard({ t, settings, avgRowBytes, onSaved, configSet }: {
   /** 当前索引行均宽(字节)——预算滑块的「约可装 N 条」预览用。 */
   avgRowBytes: number
   onSaved: () => Promise<void>
-  configSet: (payload: Record<string, number | boolean | null>) => Promise<Response>
+  configSet: (payload: Record<string, number | boolean | string | null>) => Promise<Response>
 }): ReactNode {
   const effective = settings.effective
+  // П.9: legacy boolean в override-файле показываем мигрированным значением (как в normalizeGateMode на бэкенде)
+  const gateValue = (value: unknown): string => value === true ? 'ask' : value === false ? 'off' : value === 'ask' || value === 'off' ? value : 'candidate'
   const [maxBytes, setMaxBytes] = useState(Number(effective.maxBytes))
   const [minImportance, setMinImportance] = useState(Number(effective.minImportance))
   const [staleDays, setStaleDays] = useState(Number(effective.staleAfterDays))
   const [autoSummarize, setAutoSummarize] = useState(effective.autoSummarize === true)
+  const [injectionGate, setInjectionGate] = useState(gateValue(effective.injectionGate))
+  const [recallSessionMaxBytes, setRecallSessionMaxBytes] = useState(Number(effective.recallSessionMaxBytes ?? 12000))
+  const [verifyWrites, setVerifyWrites] = useState(effective.verifyWrites !== false)
+  const [dream, setDream] = useState(effective.dream !== false)
+  const [dreamDryRun, setDreamDryRun] = useState(effective.dreamDryRun === true)
+  const [dreamIntervalHours, setDreamIntervalHours] = useState(Number(effective.dreamIntervalHours ?? 168))
+  const [dreamMaxActions, setDreamMaxActions] = useState(Number(effective.dreamMaxActions ?? 5))
+  const [dreamTranscripts, setDreamTranscripts] = useState(Number(effective.dreamTranscripts ?? 3))
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<string | null>(null)
 
@@ -1912,7 +2015,15 @@ function SettingsCard({ t, settings, avgRowBytes, onSaved, configSet }: {
     setMinImportance(Number(effective.minImportance))
     setStaleDays(Number(effective.staleAfterDays))
     setAutoSummarize(effective.autoSummarize === true)
-  }, [effective.maxBytes, effective.minImportance, effective.staleAfterDays, effective.autoSummarize])
+    setInjectionGate(gateValue(effective.injectionGate))
+    setRecallSessionMaxBytes(Number(effective.recallSessionMaxBytes ?? 12000))
+    setVerifyWrites(effective.verifyWrites !== false)
+    setDream(effective.dream !== false)
+    setDreamDryRun(effective.dreamDryRun === true)
+    setDreamIntervalHours(Number(effective.dreamIntervalHours ?? 168))
+    setDreamMaxActions(Number(effective.dreamMaxActions ?? 5))
+    setDreamTranscripts(Number(effective.dreamTranscripts ?? 3))
+  }, [effective.maxBytes, effective.minImportance, effective.staleAfterDays, effective.autoSummarize, effective.injectionGate, effective.recallSessionMaxBytes, effective.verifyWrites, effective.dream, effective.dreamDryRun, effective.dreamIntervalHours, effective.dreamMaxActions, effective.dreamTranscripts])
 
   const preset = maxBytes <= 4096 && minImportance >= 4 ? 'focus' : maxBytes >= 8192 && minImportance <= 1 ? 'companion' : ''
   const fits = Math.max(1, Math.floor((maxBytes * 0.66) / avgRowBytes))
@@ -1923,7 +2034,7 @@ function SettingsCard({ t, settings, avgRowBytes, onSaved, configSet }: {
     return <span className={source === 'override' ? 'dam-src dam-src--own' : 'dam-src'}>{source === 'override' ? t('setSourceOverride') : t('setSourceProfile')}</span>
   }
 
-  const send = (patch: Record<string, number | boolean | null>): void => {
+  const send = (patch: Record<string, number | boolean | string | null>): void => {
     setBusy(true)
     setNote(null)
     void configSet(patch)
@@ -1943,6 +2054,14 @@ function SettingsCard({ t, settings, avgRowBytes, onSaved, configSet }: {
     || minImportance !== Number(effective.minImportance)
     || staleDays !== Number(effective.staleAfterDays)
     || autoSummarize !== (effective.autoSummarize === true)
+    || injectionGate !== gateValue(effective.injectionGate)
+    || recallSessionMaxBytes !== Number(effective.recallSessionMaxBytes ?? 12000)
+    || verifyWrites !== (effective.verifyWrites !== false)
+    || dream !== (effective.dream !== false)
+    || dreamDryRun !== (effective.dreamDryRun === true)
+    || dreamIntervalHours !== Number(effective.dreamIntervalHours ?? 168)
+    || dreamMaxActions !== Number(effective.dreamMaxActions ?? 5)
+    || dreamTranscripts !== Number(effective.dreamTranscripts ?? 3)
 
   return (
     <section className="dam-stats dam-settings">
@@ -2027,15 +2146,120 @@ function SettingsCard({ t, settings, avgRowBytes, onSaved, configSet }: {
           </label>
         </div>
 
+        {/* П.9: режим гейта инъекций (candidate — тихо; legacy boolean мигрирует) */}
+        <div className="dam-ctrl">
+          <label>
+            <span className="dam-ctrl-head">{t('setInjectionGate')} {srcBadge('injectionGate')}
+              {settings.sources.injectionGate === 'override' && (
+                <button type="button" className="dam-reset" disabled={busy} aria-label={t('setResetField')} title={t('setResetField')} onClick={() => { resetField('injectionGate') }}>↺</button>
+              )}
+            </span>
+            <select className="dam-select" value={injectionGate} onChange={e => { setInjectionGate(e.target.value) }}>
+              <option value="candidate">{t('gateCandidate')}</option>
+              <option value="ask">{t('gateAsk')}</option>
+              <option value="off">{t('gateOff')}</option>
+            </select>
+            <span className="dam-ctrl-hint">{t('setInjectionGateHint')}</span>
+          </label>
+        </div>
+        <div className="dam-ctrl">
+          <label>
+            <span className="dam-ctrl-head">{t('setRecallSessionMaxBytes')} {srcBadge('recallSessionMaxBytes')}
+              {settings.sources.recallSessionMaxBytes === 'override' && (
+                <button type="button" className="dam-reset" disabled={busy} aria-label={t('setResetField')} title={t('setResetField')} onClick={() => { resetField('recallSessionMaxBytes') }}>↺</button>
+              )}
+            </span>
+            <span className="dam-ctrl-val">{recallSessionMaxBytes === 0 ? 'off' : `${(recallSessionMaxBytes / 1024).toFixed(1)} KB`}</span>
+            <input type="range" min={0} max={65536} step={512} value={recallSessionMaxBytes} onChange={e => { setRecallSessionMaxBytes(Number(e.target.value)) }} />
+            <span className="dam-ctrl-hint">{t('setRecallSessionMaxBytesHint')}</span>
+          </label>
+        </div>
+        <div className="dam-ctrl dam-ctrl--toggle">
+          <label>
+            <span className="dam-ctrl-head">{t('setVerifyWrites')} {srcBadge('verifyWrites')}
+              {settings.sources.verifyWrites === 'override' && (
+                <button type="button" className="dam-reset" disabled={busy} aria-label={t('setResetField')} title={t('setResetField')} onClick={() => { resetField('verifyWrites') }}>↺</button>
+              )}
+            </span>
+            <input type="checkbox" className="dam-check" checked={verifyWrites} onChange={e => { setVerifyWrites(e.target.checked) }} />
+          </label>
+        </div>
+
+        {/* П.7: dream — глубокий пересмотр (по умолчанию включён и пишет) */}
+        <div className="dam-ctrl dam-ctrl--toggle">
+          <label>
+            <span className="dam-ctrl-head">{t('setDream')} {srcBadge('dream')}
+              {settings.sources.dream === 'override' && (
+                <button type="button" className="dam-reset" disabled={busy} aria-label={t('setResetField')} title={t('setResetField')} onClick={() => { resetField('dream') }}>↺</button>
+              )}
+            </span>
+            <input type="checkbox" className="dam-check" checked={dream} onChange={e => { setDream(e.target.checked) }} />
+          </label>
+        </div>
+        <div className="dam-ctrl">
+          <label>
+            <span className="dam-ctrl-head">{t('setDreamIntervalHours')} {srcBadge('dreamIntervalHours')}
+              {settings.sources.dreamIntervalHours === 'override' && (
+                <button type="button" className="dam-reset" disabled={busy} aria-label={t('setResetField')} title={t('setResetField')} onClick={() => { resetField('dreamIntervalHours') }}>↺</button>
+              )}
+            </span>
+            <span className="dam-ctrl-val">{String(dreamIntervalHours)} h</span>
+            <input type="range" min={1} max={8760} step={1} value={dreamIntervalHours} onChange={e => { setDreamIntervalHours(Number(e.target.value)) }} />
+            <span className="dam-ctrl-hint">{t('setDreamIntervalHoursHint')}</span>
+          </label>
+        </div>
+        <div className="dam-ctrl">
+          <label>
+            <span className="dam-ctrl-head">{t('setDreamMaxActions')} {srcBadge('dreamMaxActions')}
+              {settings.sources.dreamMaxActions === 'override' && (
+                <button type="button" className="dam-reset" disabled={busy} aria-label={t('setResetField')} title={t('setResetField')} onClick={() => { resetField('dreamMaxActions') }}>↺</button>
+              )}
+            </span>
+            <span className="dam-ctrl-val">{String(dreamMaxActions)}</span>
+            <input type="range" min={1} max={20} step={1} value={dreamMaxActions} onChange={e => { setDreamMaxActions(Number(e.target.value)) }} />
+            <span className="dam-ctrl-hint">{t('setDreamMaxActionsHint')}</span>
+          </label>
+        </div>
+        <div className="dam-ctrl dam-ctrl--toggle">
+          <label>
+            <span className="dam-ctrl-head">{t('setDreamDryRun')} {srcBadge('dreamDryRun')}
+              {settings.sources.dreamDryRun === 'override' && (
+                <button type="button" className="dam-reset" disabled={busy} aria-label={t('setResetField')} title={t('setResetField')} onClick={() => { resetField('dreamDryRun') }}>↺</button>
+              )}
+            </span>
+            <input type="checkbox" className="dam-check" checked={dreamDryRun} onChange={e => { setDreamDryRun(e.target.checked) }} />
+          </label>
+        </div>
+        <div className="dam-ctrl">
+          <label>
+            <span className="dam-ctrl-head">{t('setDreamTranscripts')} {srcBadge('dreamTranscripts')}
+              {settings.sources.dreamTranscripts === 'override' && (
+                <button type="button" className="dam-reset" disabled={busy} aria-label={t('setResetField')} title={t('setResetField')} onClick={() => { resetField('dreamTranscripts') }}>↺</button>
+              )}
+            </span>
+            <span className="dam-ctrl-val">{String(dreamTranscripts)}</span>
+            <input type="range" min={0} max={10} step={1} value={dreamTranscripts} onChange={e => { setDreamTranscripts(Number(e.target.value)) }} />
+            <span className="dam-ctrl-hint">{t('setDreamTranscriptsHint')}</span>
+          </label>
+        </div>
+
         <div className="dam-row">
           <button type="button" className="dam-btn dam-btn-primary" disabled={busy || !dirty} onClick={() => {
             // 只发真正改动的字段(审查 major 修复):全量发会把未动字段
             // 固化成 override——来源徽章误标,profile 后续修改被旧值压死
-            const patch: Record<string, number | boolean | null> = {}
+            const patch: Record<string, number | boolean | string | null> = {}
             if (maxBytes !== Number(effective.maxBytes)) patch.maxBytes = maxBytes
             if (minImportance !== Number(effective.minImportance)) patch.minImportance = minImportance
             if (staleDays !== Number(effective.staleAfterDays)) patch.staleAfterDays = staleDays
             if (autoSummarize !== (effective.autoSummarize === true)) patch.autoSummarize = autoSummarize
+            if (injectionGate !== gateValue(effective.injectionGate)) patch.injectionGate = injectionGate
+            if (recallSessionMaxBytes !== Number(effective.recallSessionMaxBytes ?? 12000)) patch.recallSessionMaxBytes = recallSessionMaxBytes
+            if (verifyWrites !== (effective.verifyWrites !== false)) patch.verifyWrites = verifyWrites
+            if (dream !== (effective.dream !== false)) patch.dream = dream
+            if (dreamDryRun !== (effective.dreamDryRun === true)) patch.dreamDryRun = dreamDryRun
+            if (dreamIntervalHours !== Number(effective.dreamIntervalHours ?? 168)) patch.dreamIntervalHours = dreamIntervalHours
+            if (dreamMaxActions !== Number(effective.dreamMaxActions ?? 5)) patch.dreamMaxActions = dreamMaxActions
+            if (dreamTranscripts !== Number(effective.dreamTranscripts ?? 3)) patch.dreamTranscripts = dreamTranscripts
             if (Object.keys(patch).length === 0) return
             send(patch)
           }}>{t('setSave')}</button>

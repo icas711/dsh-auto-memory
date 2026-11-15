@@ -149,7 +149,7 @@ describe('createRecaller', () => {
   let root: string
   let store: MemoryStore
   const options: RecallOptions = {
-    recall: true, recallMaxMemories: 3, recallMaxBytes: 3000, recallTimeoutMs: 2000, enableUserScope: true,
+    recall: true, recallMaxMemories: 3, recallMaxBytes: 3000, recallSessionMaxBytes: 12000, recallTimeoutMs: 2000, enableUserScope: true,
   }
   const agent = (over: Partial<RecallAgent['session']['header']> = {}): RecallAgent => ({
     session: { id: 's1' as never, header: { cwd: '/work/proj', ...over } },
@@ -347,7 +347,7 @@ describe('агент/pre-step: подключение через плагин', 
     await ctx.plugin(autoMemory, {
       maxBytes: 4096, memoryDir: root, enableUserScope: true, autoSummarize: false, autoSummarizeMaxMemories: 5,
       autoSummarizeMaxTokens: 2048, autoSummarizeEveryTurns: 3, minImportance: 4, staleAfterDays: 0,
-      recall: true, recallMaxMemories: 4, recallMaxBytes: 3000, recallTimeoutMs: 2000, admins: [], enableSharedScope: true,
+      recall: true, recallMaxMemories: 4, recallMaxBytes: 3000, recallSessionMaxBytes: 12000, recallTimeoutMs: 2000, admins: [], enableSharedScope: true,
     })
     const store = new MemoryStore(root)
     await store.write({ name: 'language', description: 'Отвечать по-русски', type: 'feedback', body: 'Отвечать по-русски' }, 'user')
@@ -372,7 +372,7 @@ describe('агент/pre-step: подключение через плагин', 
     agent: { session: { id: 's2', header: { cwd: '/work/proj' } }, options: { provider: 'p', model: 'm' } },
     messages, turn: 1, step: 1, signal: new AbortController().signal,
   })
-  const opts: RecallOptions = { recall: true, recallMaxMemories: 3, recallMaxBytes: 3000, recallTimeoutMs: 2000, enableUserScope: true }
+  const opts: RecallOptions = { recall: true, recallMaxMemories: 3, recallMaxBytes: 3000, recallSessionMaxBytes: 12000, recallTimeoutMs: 2000, enableUserScope: true }
 
   it('слушатель дописывает сообщение recall ПОСЛЕ сообщений шага (хвост, не системный промпт)', async () => {
     const store = new MemoryStore(root)

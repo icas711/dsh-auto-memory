@@ -74,7 +74,7 @@ export interface MemoryFace {
   auditStats: () => Promise<{ sessions: number; injections: number; memories: Array<{ name: string; injectedCount: number; lastTs: number }>; timeline: Array<{ ts: number; sessionId: string; cwd: string; count: number; bytes: number; truncated: number }> }>
   /** 1.0.0 记忆体检:待验证/僵尸/矛盾/已过期四榜(只读报告;行动在记忆卡片上)。 */
   healthReport: () => Promise<{
-    unverified: Array<{ name: string; scope: string; slug: string; hasEvidence: boolean }>
+    unverified: Array<{ name: string; scope: string; slug: string; hasEvidence: boolean; untrusted?: string }>
     zombies: Array<{ name: string; scope: string; slug: string; ageDays: number }>
     conflicts: Array<{ kind: 'cross-scope' | 'near-duplicate'; a: { name: string; scope: string }; b: { name: string; scope: string } }>
     expired: Array<{ name: string; scope: string; slug: string; expiredDays: number }>
@@ -83,12 +83,12 @@ export interface MemoryFace {
   exportAgents: () => Promise<{ content: string; count: number }>
   /** 1.4.0 设置中心:当前生效配置 + 每字段来源(profile / 用户覆盖)。 */
   configGet: () => Promise<{
-    effective: Record<string, number | boolean>
-    overrides: Record<string, number | boolean>
+    effective: Record<string, number | boolean | string>
+    overrides: Record<string, number | boolean | string>
     sources: Record<string, string>
   }>
   /** 1.4.0 设置中心:写入部分覆盖(白名单字段;值 null = 重置回 profile 默认;越权键 400)。 */
-  configSet: (payload: Record<string, number | boolean | null>) => Promise<Response>
+  configSet: (payload: Record<string, number | boolean | string | null>) => Promise<Response>
 }
 
 const BASE = '/api/auto-memory'

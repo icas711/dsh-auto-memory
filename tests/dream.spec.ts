@@ -15,18 +15,21 @@ import {
   applyDreamActions, buildDreamPrompt, buildManifest, extractTranscriptLine, gatherDigest, parseDreamActions, registerDream,
 } from '../src/dream.ts'
 import type { DreamAction, DreamManifestItem, DreamOptions } from '../src/dream.ts'
+import type { RecallOptions } from '../src/recall.ts'
 import type { RecallSelector } from '../src/recall.ts'
 
-const baseOptions = (over: Partial<DreamOptions> = {}): DreamOptions => ({
-  enableUserScope: true, dream: true, dreamIntervalHours: 168, dreamMaxActions: 5, dreamDryRun: false, dreamTranscripts: 3, ...over,
+const baseOptions = (over: Partial<DreamOptions & RecallOptions> = {}): DreamOptions & RecallOptions => ({
+  enableUserScope: true, dream: true, dreamIntervalHours: 168, dreamMaxActions: 5, dreamDryRun: false, dreamTranscripts: 3,
+  recall: true, recallMaxMemories: 3, recallMaxBytes: 3000, recallTimeoutMs: 2000,
+  ...over,
 })
 
 describe('buildManifest (Orient)', () => {
   it('человеческий возраст (П.1), статус, pinned, preview тела', () => {
     const now = Date.UTC(2026, 10, 15)
     const manifest = buildManifest([
-      { name: 'old-fact', description: 'старая', type: 'project', body: 'тело', updatedMs: now - 47 * 86_400_000, status: 'candidate' },
-      { name: 'pinned-fact', description: 'закреплена', type: 'user', body: 'x', updatedMs: now, pinned: true },
+      { name: 'old-fact', description: 'старая', type: 'project', body: 'тело', scope: 'project', updatedMs: now - 47 * 86_400_000, status: 'candidate' },
+      { name: 'pinned-fact', description: 'закреплена', type: 'user', body: 'x', scope: 'user', updatedMs: now, pinned: true },
     ], now)
     expect(manifest[0]).toMatchObject({ name: 'old-fact', updated: '47 days ago', status: 'candidate' })
     expect(manifest[1]).toMatchObject({ name: 'pinned-fact', updated: 'today', pinned: true })

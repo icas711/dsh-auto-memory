@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import { MemoryStore, projectKey } from '../src/store.ts'
-import { registerMemoryApi } from '../src/memory-api.ts'
+import { buildHealthReport, registerMemoryApi } from '../src/memory-api.ts'
 
 const BASE = '/api/auto-memory'
 const CWD = 'D:\\api-proj'
@@ -196,5 +196,21 @@ describe('groups.list 显示逻辑(0.10.0)', () => {
     expect(body.groups.find(group => group.memories.some(memory => memory.name === 'ancient')))
       .toBeDefined()
     expect(body.groups.flatMap(group => group.memories).find(memory => memory.name === 'ancient')?.stale).toBe(true)
+  })
+})
+
+
+describe('health.report: untrusted-метка (П.9 v1.12)', () => {
+  it('candidate с untrusted попадает в unverified с источником; без метки — без поля', () => {
+    const now = Date.now()
+    const report = buildHealthReport([
+      { record: { name: 'quiet', description: 'тихая запись', type: 'project', body: 'тело', scope: 'project', status: 'candidate', untrusted: 'web_fetch' }, scope: 'project', slug: 'D--api-proj' },
+      { record: { name: 'normal', description: 'обычная', type: 'project', body: 'тело', scope: 'project', status: 'candidate' }, scope: 'project', slug: 'D--api-proj' },
+    ], now)
+    const quiet = report.unverified.find(entry => entry.name === 'quiet')
+    const normal = report.unverified.find(entry => entry.name === 'normal')
+    expect(quiet?.untrusted).toBe('web_fetch')
+    expect(normal).toBeDefined()
+    expect(normal?.untrusted).toBeUndefined()
   })
 })

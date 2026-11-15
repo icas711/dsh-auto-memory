@@ -526,8 +526,9 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
         let written = 0
         for (const raw of candidates) {
           if (written >= options.autoSummarizeMaxMemories) break
-          let candidate = sanitizeCandidate(raw, options.enableUserScope, { sessionId: sessionId, transcript: lines.join('\n\n'), enableSharedScope: allowShared })
-          if (candidate === null) continue
+          const sanitized = sanitizeCandidate(raw, options.enableUserScope, { sessionId: sessionId, transcript: lines.join('\n\n'), enableSharedScope: allowShared })
+          if (sanitized === null) continue
+          let candidate = sanitized
           // Сбой одного кандидата (отказ по правам общего слоя, ошибка блокировки/IO) пропускает только его и не ломает весь пакет —
           // личные факты не должны пропадать из-за отклонённого общего кандидата
           try {

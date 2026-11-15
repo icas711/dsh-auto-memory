@@ -180,7 +180,7 @@ async function scanAllRecords(rootDir: string): Promise<Array<{ record: MemoryRe
 /** 记忆体检报告(1.0.0 可信记忆;三榜,面板 HealthSection 渲染)。 */
 export interface HealthReport {
   /** 待验证:status=candidate 的记忆(固化产物,引导用户升级 verified)。 */
-  unverified: Array<{ name: string, scope: MemoryScope, slug: string, hasEvidence: boolean }>
+  unverified: Array<{ name: string, scope: MemoryScope, slug: string, hasEvidence: boolean, untrusted?: string }>
   /** 僵尸:零引用且超过 30 天(从未被任何会话召回过——沉淀即遗忘)。 */
   zombies: Array<{ name: string, scope: MemoryScope, slug: string, ageDays: number }>
   /** 矛盾嫌疑:跨层同名 + 同层近重复(description 相似度 ≥0.9)。 */
@@ -194,7 +194,8 @@ export function buildHealthReport(entries: Array<{ record: MemoryRecord, scope: 
   const report: HealthReport = { unverified: [], zombies: [], conflicts: [], expired: [] }
   for (const { record, scope, slug } of entries) {
     if (record.status === 'candidate') {
-      report.unverified.push({ name: record.name, scope, slug, hasEvidence: record.evidence !== undefined })
+      // П.9 (v1.12): метка «записано после недоверенного чтения» проходит в панель
+      report.unverified.push({ name: record.name, scope, slug, hasEvidence: record.evidence !== undefined, ...(record.untrusted !== undefined ? { untrusted: record.untrusted } : {}) })
     }
     const ageDays = record.createdMs !== undefined ? Math.floor((now - record.createdMs) / 86_400_000) : 0
     if ((record.reads ?? 0) === 0 && ageDays > 30 && record.status !== 'disputed' && record.status !== 'superseded') {

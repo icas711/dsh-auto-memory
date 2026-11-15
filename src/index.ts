@@ -79,6 +79,8 @@ export interface Config {
   injectionGate?: boolean
   /** Маски имён инструментов, чтение которых «заражает» ход (пусто = набор по умолчанию). */
   untrustedTools?: string[]
+  /** П.6 (v1.12): верификация путей (claim-verify) в авто-создаваемых project/reference памяти. */
+  verifyWrites?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -106,6 +108,7 @@ export const Config: z<Config> = z.object({
   recallOtherProjects: z.boolean().default(true),
   injectionGate: z.boolean().default(true),
   untrustedTools: z.array(z.string()).default([]),
+  verifyWrites: z.boolean().default(true),
 })
 
 export function apply(ctx: Context, config: Config): void {

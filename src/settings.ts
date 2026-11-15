@@ -29,6 +29,7 @@ export const SETTABLE_FIELDS = {
   autoSummarize: { kind: 'boolean' },
   autoSummarizeMaxMemories: { kind: 'number', min: 1, max: 20, step: 1 },
   autoSummarizeEveryTurns: { kind: 'number', min: 1, max: 20, step: 1 },
+  verifyWrites: { kind: 'boolean' },
   recall: { kind: 'boolean' },
   recallMaxMemories: { kind: 'number', min: 1, max: 10, step: 1 },
   recallMaxBytes: { kind: 'number', min: 512, max: 16_384, step: 256 },

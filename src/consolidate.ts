@@ -31,6 +31,7 @@ import { normalizeName, asMemoryType, DEFAULT_IMPORTANCE } from './store.ts'
 import { ownerOf } from './owner.ts'
 import { decideConsolidationAction, detectContradictions, words } from './matching.ts'
 import { collectInstructionDigest } from './instructions.ts'
+import { extractPathClaims, stripFailedSentences, verifyPathClaims } from './verify.ts'
 import type { MemoryEvidence, MemoryScope, MemoryStatus, MemoryType } from './types.ts'
 
 // dsh-subagent 在 AgentOptions 上声明的字段(此处同样声明合并,不引入对
@@ -67,6 +68,8 @@ export interface ConsolidationOptions {
   minImportance: number
   /** 1.7.0: через сколько новых пользовательских сообщений запускать инкрементальную консолидацию на границе хода (agent/turn-stopping); по умолчанию 3. */
   autoSummarizeEveryTurns?: number
+  /** П.6 (v1.12): верификация путей в авто-создаваемых project/reference кандидатах (по умолчанию включена). */
+  verifyWrites?: boolean
 }
 
 /** 一条固化候选(LLM 输出的一个元素,sanitize 前)。 */
@@ -523,7 +526,7 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
         let written = 0
         for (const raw of candidates) {
           if (written >= options.autoSummarizeMaxMemories) break
-          const candidate = sanitizeCandidate(raw, options.enableUserScope, { sessionId: sessionId, transcript: lines.join('\n\n'), enableSharedScope: allowShared })
+          let candidate = sanitizeCandidate(raw, options.enableUserScope, { sessionId: sessionId, transcript: lines.join('\n\n'), enableSharedScope: allowShared })
           if (candidate === null) continue
           // Сбой одного кандидата (отказ по правам общего слоя, ошибка блокировки/IO) пропускает только его и не ломает весь пакет —
           // личные факты не должны пропадать из-за отклонённого общего кандидата
@@ -551,6 +554,21 @@ export function registerConsolidation(ctx: Context, baseStore: MemoryStore, opti
           if (anchorDeletes.includes(candidate.name)) {
             ctx.logger.info(`[dsh-auto-memory] consolidation resurrect-blocked: ${candidate.name}`)
             continue
+          }
+          // П.6: claim-verify — пути из тела проверяются fs.stat; только create,
+          // только project/reference (update-ветка: якорь — существующая память).
+          if (options.verifyWrites !== false && decision.action === 'create' && (candidate.type === 'project' || candidate.type === 'reference')) {
+            const claims = extractPathClaims(candidate.body)
+            const failed = (await verifyPathClaims(claims, cwd)).filter(result => !result.exists)
+            if (failed.length > 0) {
+              const stripped = stripFailedSentences(candidate.body, failed.map(result => result.claim))
+              if (stripped.stripped > 0 && stripped.body.length >= 80) {
+                candidate = { ...candidate, body: stripped.body } // честная деградация без битых путей
+              } else {
+                ctx.logger.info(`[dsh-auto-memory] candidate "${candidate.name}" dropped: stale path claims`)
+                continue
+              }
+            }
           }
           if (decision.action === 'create') {
             const effectiveImportance = candidate.importance ?? DEFAULT_IMPORTANCE[candidate.type]

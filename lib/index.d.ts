@@ -44,6 +44,8 @@ interface Config {
   curateIntervalHours?: number;
   /** Максимум слияний за один проход. */
   curateMaxMerges?: number;
+  /** 1.11.0: recall подмешивает project-память других рабочих областей владельца. */
+  recallOtherProjects?: boolean;
   /** 1.10.0: гейт инъекций — memory_write после чтения внешнего контента идёт через подтверждение человека. */
   injectionGate?: boolean;
   /** Маски имён инструментов, чтение которых «заражает» ход (пусто = набор по умолчанию). */

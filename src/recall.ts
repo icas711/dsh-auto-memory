@@ -51,6 +51,8 @@ export interface RecallOptions {
   enableUserScope: boolean
   /** 1.8.0: участвует ли общий слой в recall (по умолчанию участвует). */
   enableSharedScope?: boolean
+  /** 1.11.0: подмешивать project-память других рабочих областей того же владельца (по умолчанию да). */
+  recallOtherProjects?: boolean
 }
 
 /** Минимальная форма агента, нужная recall (совместима с настоящим Agent; удобно подставлять заглушки в тестах). */
@@ -165,6 +167,16 @@ function dateOf(ms: number | undefined): string {
 }
 
 /** Формирует тело сообщения recall (с протокольной оболочкой) в рамках бюджета байтов; запись, которая не помещается, пропускается целиком, последнюю можно обрезать. */
+/** Ключ «уже показано в сессии»; у записей из чужих областей включает область (имена могут совпадать). */
+function seenKey(record: MemoryRecord): string {
+  return `${record.scope}:${record.workspace ?? ''}:${record.name}`
+}
+
+/** Человекочитаемая метка области из имени каталога `--slug--`. */
+export function originLabel(origin: string): string {
+  return origin.replace(/^--|--$/g, '')
+}
+
 export function renderRecallBlock(records: readonly MemoryRecord[], maxBytes: number): { text: string, included: MemoryRecord[] } {
   const head = `${RECALL_OPEN}\n${RECALL_NOTE}\n`
   const tail = `\n${RECALL_CLOSE}`
@@ -173,7 +185,7 @@ export function renderRecallBlock(records: readonly MemoryRecord[], maxBytes: nu
   const included: MemoryRecord[] = []
   for (const record of records) {
     const updated = dateOf(record.updatedMs ?? record.createdMs)
-    const header = `### ${stripMemoryTags(record.title ?? record.name)} (${record.type}, ${record.scope}${updated.length > 0 ? `, updated ${updated}` : ''})\n`
+    const header = `### ${stripMemoryTags(record.title ?? record.name)} (${record.type}, ${record.scope}${record.workspace !== undefined ? `, из другой области: ${originLabel(record.workspace)}` : ''}${updated.length > 0 ? `, updated ${updated}` : ''})\n`
     let body = stripMemoryTags(record.body.trim())
     if (body.length > BODY_MAX_CHARS) body = `${body.slice(0, BODY_MAX_CHARS)}…`
     let block = `${header}${body}`
@@ -235,9 +247,19 @@ export function createRecaller(baseStore: MemoryStore, options: RecallOptions, s
         if (options.enableUserScope) records.push(...await store.list('user'))
         if (cwd !== undefined) records.push(...await store.list('project', cwd))
         if (options.enableSharedScope !== false) records.push(...await store.list('shared'))
+        // 1.11.0: project-память других рабочих областей этого же владельца (с пометкой происхождения)
+        if (options.recallOtherProjects !== false) {
+          // имя из текущей области/слоёв приоритетнее: селектор выбирает по name, коллизии недопустимы
+          const taken = new Set(records.map(record => record.name))
+          for (const record of await store.listOtherProjects(cwd)) {
+            if (taken.has(record.name)) continue
+            taken.add(record.name)
+            records.push(record)
+          }
+        }
         const now = Date.now()
         const seen = surfaced.get(agent.session.id) ?? new Set<string>()
-        const candidates = records.filter(record => isInjectable(record, now) && !seen.has(`${record.scope}:${record.name}`))
+        const candidates = records.filter(record => isInjectable(record, now) && !seen.has(seenKey(record)))
         if (candidates.length === 0) return null
 
         const maxMemories = Math.max(1, options.recallMaxMemories ?? 4)
@@ -270,8 +292,8 @@ export function createRecaller(baseStore: MemoryStore, options: RecallOptions, s
 
         // Помечаем как показанное + учитываем одно чтение (счётчик ссылок для политики забывания; сбой тихо игнорируется)
         for (const record of included) {
-          seen.add(`${record.scope}:${record.name}`)
-          void store.touch(record.name, record.scope, cwd)
+          seen.add(seenKey(record))
+          void (record.workspace !== undefined ? store.touchOrigin(record.name, record.workspace) : store.touch(record.name, record.scope, cwd))
         }
         surfaced.set(agent.session.id, seen)
 

@@ -62,6 +62,8 @@ export interface MemoryRecord {
   body: string
   /** 来源作用域(决定存储目录)。 */
   scope: MemoryScope
+  /** 1.11.0: только в памяти (не сериализуется) — каталог чужой рабочей области, откуда запись подмешана в recall. */
+  workspace?: string
   /** 置顶保护(P2-3):软淘汰永不隐藏;索引渲染排在最前,预算截断天然优先保留。 */
   pinned?: boolean
   /** 软停用(#10):不注入、不删除——删除与保留之间的第三档;memory_list 可见。 */

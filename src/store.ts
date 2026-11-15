@@ -689,6 +689,58 @@ export class MemoryStore {
     return records.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   }
 
+  /**
+   * 1.11.0: project-записи ДРУГИХ рабочих областей того же владельца (для recall).
+   * Только личный корень владельца: чужие владельцы недоступны (personalRoot отдельный),
+   * при owner=undefined (CLI) — старая раскладка, тоже только свои каталоги `--…--`.
+   * Каждая запись помечена `origin` = имя каталога области; sorted, не более `limitDirs` каталогов (свежие первыми).
+   */
+  async listOtherProjects(excludeCwd: string | undefined, limitDirs = 20): Promise<MemoryRecord[]> {
+    let dirents
+    try {
+      dirents = await fsp.readdir(this.personalRoot, { withFileTypes: true })
+    } catch {
+      return []
+    }
+    const skip = excludeCwd === undefined ? undefined : projectKey(excludeCwd)
+    const dirs: Array<{ name: string, mtime: number }> = []
+    for (const d of dirents) {
+      if (!d.isDirectory() || !/^--.+--$/.test(d.name) || d.name === skip) continue
+      const st = await fsp.stat(join(this.personalRoot, d.name)).catch(() => null)
+      if (st !== null) dirs.push({ name: d.name, mtime: st.mtimeMs })
+    }
+    dirs.sort((a, b) => b.mtime - a.mtime)
+    const out: MemoryRecord[] = []
+    for (const { name } of dirs.slice(0, limitDirs)) {
+      const dir = join(this.personalRoot, name)
+      let files
+      try { files = await fsp.readdir(dir, { withFileTypes: true }) } catch { continue }
+      for (const f of files) {
+        if (!f.isFile() || !f.name.endsWith('.md') || f.name.toLowerCase() === INDEX_FILENAME.toLowerCase()) continue
+        const file = join(dir, f.name)
+        if (isSymlink(file)) continue
+        const raw = await fsp.readFile(file, 'utf8').catch(() => null)
+        const record = raw === null ? null : parseMemory(raw, 'project')
+        if (record !== null && this.canSee(record)) out.push({ ...record, workspace: name })
+      }
+    }
+    return out
+  }
+
+  /** 1.11.0: счётчик чтения для записи из чужой области (origin = имя каталога из listOtherProjects). */
+  async touchOrigin(name: string, origin: string): Promise<void> {
+    if (!/^--.+--$/.test(origin) || origin.includes('/') || origin.includes('\\')) return
+    try {
+      const dir = join(this.personalRoot, origin)
+      const file = join(dir, `${normalizeName(name)}.md`)
+      await withLockRecovery(join(dir, INDEX_FILENAME), async () => {
+        const record = parseMemory(await fsp.readFile(file, 'utf8').catch(() => ''), 'project')
+        if (record === null) return
+        await writeFileAtomic(file, serializeMemory({ ...record, reads: (record.reads ?? 0) + 1, lastReadMs: Date.now() }), { mode: 0o600, dirMode: 0o700 })
+      })
+    } catch { /* best-effort */ }
+  }
+
   /** 读单条记忆;不存在/为 symlink/畸形返回 null。 */
   async read(name: string, scope: MemoryScope, cwd?: string): Promise<MemoryRecord | null> {
     const file = join(this.dir(scope, cwd), `${normalizeName(name)}.md`)

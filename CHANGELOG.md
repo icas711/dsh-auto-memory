@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 the [GitHub Releases](https://github.com/AskTheWay/dsh-auto-memory/releases)
 page (generated from this file at publish time).
 
+## [1.11.0] - 2026-11-15
+
+### Added
+- Recall across workspaces: per-message recall also considers `project` memories of the owner's OTHER workspaces (same owner only), labelled "из другой области: <область>". Option `recallOtherProjects` (default `true`).
+
+### Fixed
+- 1.10.2: a write body over 4000 chars is now rejected with an explicit error instead of being silently truncated.
+
 ## [1.10.0] - 2026-11-15
 
 Hardening for the multi-user web build (replacing the built-in memory).

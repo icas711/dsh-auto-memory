@@ -34,6 +34,7 @@ import { isInjectable, stripMemoryTags } from './store.ts'
 import { ownerOf } from './owner.ts'
 import { descriptionCoverage } from './matching.ts'
 import { humanAge, stalenessNote } from './age.ts'
+import { createRecentTools } from './recent-tools.ts'
 import type { MemoryRecord } from './types.ts'
 
 /** Настройки recall (подмножество Config из index.ts; читаются через live-объект, изменения на лету действуют со следующего сообщения). */
@@ -108,10 +109,21 @@ export function shortlist(query: string, records: readonly MemoryRecord[], limit
   return scored.slice(0, limit).map(entry => entry.record)
 }
 
-/** Промпт селектора. Закрывающие теги в запросе нейтрализуются, кандидаты даются только как name/type/description. */
-export function buildSelectorPrompt(query: string, candidates: readonly MemoryRecord[], maxMemories: number): string {
+/** Промпт селектора. Закрывающие теги в запросе нейтрализуются, кандидаты даются только как name/type/description.
+ *  П.3: непустое окно недавно использованных инструментов добавляет секцию перед запросом —
+ *  reference/API-доки этих инструментов не выбирать (usage уже в контексте),
+ *  предупреждения/gotchas про них — выбирать. */
+export function buildSelectorPrompt(query: string, candidates: readonly MemoryRecord[], maxMemories: number, recentTools?: readonly string[]): string {
   const safeQuery = query.replaceAll(/<\s*\/\s*user_message\s*>/gi, '[/user_message]')
   const lines = candidates.map(record => `- ${record.name} | ${record.type} | ${record.description.replaceAll(/\s+/g, ' ').slice(0, 200)}`)
+  const toolsBlock = recentTools !== undefined && recentTools.length > 0
+    ? `Recently used tools in this session: ${recentTools.join(', ')}.
+Do NOT pick reference/API-documentation memories just because they describe these
+tools — their working usage is already in context. DO pick memories that carry
+warnings, gotchas, or known issues about them.
+
+`
+    : ''
   return `You are the memory-recall step of an AI assistant. The user just sent the message below.
 From the candidate memories, pick the ones that would clearly help answer THAT message:
 relevant facts about the user, their preferences or constraints, earlier decisions,
@@ -124,7 +136,7 @@ enough. If none is clearly useful, return [].
 - Return ONLY a JSON array of exact memory names, for example ["name-a","name-b"].
   No prose, no explanations.
 
-<user_message>
+${toolsBlock}<user_message>
 ${safeQuery}
 </user_message>
 
@@ -237,7 +249,7 @@ function recallSource(): UserMessage['source'] {
   return { kind: 'plugin', plugin: 'dsh-auto-memory', form: 'recall' } as UserMessage['source']
 }
 
-export function createRecaller(baseStore: MemoryStore, options: RecallOptions, select: RecallSelector): Recaller {
+export function createRecaller(baseStore: MemoryStore, options: RecallOptions, select: RecallSelector, getRecentTools?: (sessionId: string) => readonly string[]): Recaller {
   /** sessionId → уже показанные `${scope}:${name}`. */
   const surfaced = new Map<string, Set<string>>()
 
@@ -274,7 +286,8 @@ export function createRecaller(baseStore: MemoryStore, options: RecallOptions, s
 
         const maxMemories = Math.max(1, options.recallMaxMemories ?? 4)
         const shortlisted = shortlist(query, candidates, MAX_CANDIDATES_IN_PROMPT)
-        const prompt = buildSelectorPrompt(query, shortlisted, maxMemories)
+        // П.3: окно недавно использованных инструментов сессии влияет на выбор селектора
+        const prompt = buildSelectorPrompt(query, shortlisted, maxMemories, getRecentTools?.(agent.session.id))
 
         // Жёсткий таймаут + отмена вместе с ходом: срабатывание любого из них отменяет этот recall
         const controller = new AbortController()
@@ -360,9 +373,20 @@ export interface RecallHandle {
   cleanup: (sessionId: string) => void
 }
 
-/** Хук agent/pre-step: после решения по умолчанию добавляет сообщение recall; при любом сбое пропускает решение без изменений. */
+/** Хук agent/pre-step: после решения по умолчанию добавляет сообщение recall; при любом сбое пропускает решение без изменений.
+ *  П.3: параллельно слушает tools/pre-execute и ведёт скользящее окно недавно использованных
+ *  инструментов сессии (reference-доки этих инструментов не подмешивать в recall, gotchas — подмешивать). */
 export function registerRecall(ctx: Context, store: MemoryStore, options: RecallOptions, select?: RecallSelector): RecallHandle {
-  const recaller = createRecaller(store, options, select ?? createLlmSelector(ctx, options))
+  const recentTools = createRecentTools()
+  const recaller = createRecaller(store, options, select ?? createLlmSelector(ctx, options), id => recentTools.get(id))
+
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    const decision = await next()
+    if (decision.kind !== 'allow') return decision
+    const sessionId = String((exec as unknown as { agent?: { session?: { id?: unknown } } }).agent?.session?.id ?? '')
+    if (sessionId.length > 0) recentTools.record(sessionId, exec.name)
+    return decision
+  })
 
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
@@ -373,5 +397,10 @@ export function registerRecall(ctx: Context, store: MemoryStore, options: Recall
     return { ...decision, messages: [...decision.messages, result.message] }
   })
 
-  return { cleanup: recaller.cleanup }
+  return {
+    cleanup: sessionId => {
+      recaller.cleanup(sessionId)
+      recentTools.cleanup(sessionId)
+    },
+  }
 }

@@ -278,6 +278,13 @@ snapshot. Stored as overrides in the memory root's `settings.json`
 | `recall` | on/off | true | per-message recall: a separate LLM call picks relevant memories and appends them to the context |
 | `recallMaxMemories` | 1–10 | 4 | memories attached per user message |
 | `recallMaxBytes` | 512–16384 | 3000 | byte budget of the recall message |
+| `recallSessionMaxBytes` | 0–65536 | 12000 | cumulative recall budget per session (0 = off) |
+| `verifyWrites` | on/off | **true** | check path claims in auto-created project/reference memories against the workspace |
+| `dream` | on/off | **true** | deep periodic review: refresh/supersede/create from recent transcripts (writes automatically) |
+| `dreamIntervalHours` | 1–8760 | 168 | at most once per N hours per layer (`.dream` stamp) |
+| `dreamMaxActions` | 1–20 | 5 | hard cap of write actions per dream pass |
+| `dreamDryRun` | on/off | false | true = preview mode: proposals logged, nothing written |
+| `dreamTranscripts` | 0–10 | 3 | recent sessions summarized into the dream digest |
 
 **Profile config** — override in your profile's `cordis.patch.yml` (config
 replaces wholesale). This is where `memoryDir` and `enableUserScope` live,
@@ -299,9 +306,16 @@ and where the defaults the runtime layer falls back to come from:
     recallTimeoutMs: 6000        # hard timeout of the selector call; on timeout the step runs unchanged
     recallProvider: ''           # selector provider/model, set both to use a cheaper model;
     recallModel: ''              # empty = the session's own model
+    recallSessionMaxBytes: 12000 # cumulative recall budget per session (0 = off)
     staleAfterDays: 0            # >0: soft-hide zero-read memories older than N days (files kept)
-    injectionGate: true          # memory_write after reading documents/web requires human confirmation
+    verifyWrites: true           # auto-created memories: path claims verified with fs.stat
+    injectionGate: candidate     # candidate (silent, saved as candidate + untrusted marker) | ask | off
     untrustedTools: []           # tool-name masks that taint a turn (empty = built-in defaults)
+    dream: true                  # deep periodic review (see "Dream"), writes automatically
+    dreamIntervalHours: 168      # at most once per N hours per layer
+    dreamMaxActions: 5           # hard cap of write actions per dream pass
+    dreamDryRun: false           # true = preview: proposals logged, nothing written
+    dreamTranscripts: 3          # recent sessions summarized into the dream digest
     curate: true                 # background cleanup: merge duplicate memories (see "Background cleanup")
     curateIntervalHours: 24      # at most once per N hours per layer
     curateMaxMerges: 3           # merges per pass
@@ -327,6 +341,44 @@ duplicate memories inside each of the employee's personal layers and merges them
 Pinned, disabled, disputed and expired memories are never touched; merges never cross layers
 (personal never moves into shared); the shared layer is not curated in this version. A
 `.curated` stamp in each layer directory limits passes to `curateIntervalHours`.
+
+## Dream (1.12.0)
+
+A deep periodic review of each personal layer, fully automatic: after the first finished
+turn of a session (never blocking it), not more often than `dreamIntervalHours` per layer
+(`.dream` stamp), the plugin first runs the mechanical curate dedup, then makes ONE LLM
+call per layer that sees the layer manifest (name/type/status + human age, e.g.
+"updated 47 days ago") together with a digest of the last `dreamTranscripts` session
+transcripts, and proposes `update` / `supersede` / `create` actions.
+
+Guardrails that make automatic writing safe:
+
+- **No deletions.** A replaced memory is marked `superseded` with a pointer to its
+  successor (reversible from the panel); no fact is ever lost without a pointer.
+- **Pinned, verified and disputed memories are skipped** (verified gets a log-only
+  proposal; admins decide).
+- **Hard cap** `dreamMaxActions` write actions per pass; model-written records carry
+  `candidate` status (visible in the panel, promoted by the user).
+- **Receipts** for every action in the plugin log (`dream applied: update <name> — reason`).
+- `dreamDryRun: true` turns the pass into a preview (proposals logged, nothing written);
+  `dream: false` switches dream off entirely.
+
+## Injection gate modes (1.12.0)
+
+`injectionGate` is now a mode, not a boolean (legacy `true`/`false` migrate to
+`'ask'`/`'off'`):
+
+- `'candidate'` (default) — a `memory_write` made after the turn read untrusted content
+  (documents, web) is saved **silently**: no popup, status `candidate`, frontmatter marker
+  `untrusted: <tool>` and a receipt in the tool result; review such writes in the health
+  board and promote or delete them. This also unblocks headless setups, where an
+  unanswerable ask used to block the write forever.
+- `'ask'` — previous behavior: every such write requires human confirmation.
+- `'off'` — no taint tracking at all.
+
+The directive-pattern guard is untouched in every mode: instruction-like content is still
+forced to `disputed` and never injected. Rare destructive asks (`memory_delete_all`,
+`memory_prune` with `dryRun=false`, shared-layer review) remain in place.
 
 ## Multi-user (1.8.0)
 

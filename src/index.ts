@@ -22,6 +22,7 @@ import { registerConsolidation } from './consolidate.ts'
 import { registerRecall } from './recall.ts'
 import { ownerOf } from './owner.ts'
 import { registerCuration } from './curate.ts'
+import { registerDream } from './dream.ts'
 import { createIdentityBridge } from './identity.ts'
 import { registerInjectionGate } from './injection-gate.ts'
 import { registerMemoryApi } from './memory-api.ts'
@@ -81,6 +82,16 @@ export interface Config {
   untrustedTools?: string[]
   /** П.6 (v1.12): верификация путей (claim-verify) в авто-создаваемых project/reference памяти. */
   verifyWrites?: boolean
+  /** П.7 (v1.12): dream — глубокий периодический пересмотр памяти; включён по умолчанию (ревизия 2: пишет автоматически). */
+  dream?: boolean
+  /** Не чаще раза в N часов на слой (штамп .dream). */
+  dreamIntervalHours?: number
+  /** Жёсткий cap действий записи за один dream-проход. */
+  dreamMaxActions?: number
+  /** true = режим превью: предложения только в лог (по умолчанию false — dream пишет). */
+  dreamDryRun?: boolean
+  /** Сколько последних сессий читать для дайджеста. */
+  dreamTranscripts?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -109,6 +120,11 @@ export const Config: z<Config> = z.object({
   injectionGate: z.union([z.const('candidate'), z.const('ask'), z.const('off'), z.boolean()]).default('candidate'),
   untrustedTools: z.array(z.string()).default([]),
   verifyWrites: z.boolean().default(true),
+  dream: z.boolean().default(true),
+  dreamIntervalHours: z.number().default(168),
+  dreamMaxActions: z.number().default(5),
+  dreamDryRun: z.boolean().default(false),
+  dreamTranscripts: z.number().default(3),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -187,6 +203,8 @@ export function apply(ctx: Context, config: Config): void {
   // 1.7.0: recall по запросу (добавление в хвост на agent/pre-step, системный промпт не трогаем → KV-префикс стабилен)
   const recall = registerRecall(ctx, store, live)
   const curation = registerCuration(ctx, store, live)
+  // П.7 (ревизия 2): dream включён и пишет по умолчанию; guardrails в src/dream.ts
+  const dream = registerDream(ctx, store, live)
 
   const audit = registerInjectionAudit(store, live, rootDir, consolidation.getQueryText)
   ctx.systemPrompt.section({
@@ -199,6 +217,7 @@ export function apply(ctx: Context, config: Config): void {
     consolidation.cleanup(session.id)
     recall.cleanup(session.id)
     curation.cleanup(session.id)
+    dream.cleanup(session.id)
     gate.cleanup(String(session.id))
   })
 }

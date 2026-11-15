@@ -35,6 +35,12 @@ export const SETTABLE_FIELDS = {
   recallMaxBytes: { kind: 'number', min: 512, max: 16_384, step: 256 },
   recallSessionMaxBytes: { kind: 'number', min: 0, max: 65_536, step: 512 },
   injectionGate: { kind: 'enum', values: ['candidate', 'ask', 'off'] } as const,
+  verifyWrites: { kind: 'boolean' },
+  dream: { kind: 'boolean' },
+  dreamIntervalHours: { kind: 'number', min: 1, max: 8_760, step: 1 },
+  dreamMaxActions: { kind: 'number', min: 1, max: 20, step: 1 },
+  dreamDryRun: { kind: 'boolean' },
+  dreamTranscripts: { kind: 'number', min: 0, max: 10, step: 1 },
 } as const
 
 export type SettableField = keyof typeof SETTABLE_FIELDS

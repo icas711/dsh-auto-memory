@@ -56,6 +56,8 @@ export interface Config {
   recallMaxMemories: number
   /** Бюджет в байтах для сообщения с recall. */
   recallMaxBytes: number
+  /** П.5 (v1.12): кумулятивный бюджет recall на сессию (байт); 0 = выключено. */
+  recallSessionMaxBytes: number
   /** Жёсткий таймаут вызова селектора (мс); по таймауту recall тихо пропускается. */
   recallTimeoutMs: number
   /** Отдельные provider/model для селектора (задавать парой; пусто = модель сессии). */
@@ -92,6 +94,7 @@ export const Config: z<Config> = z.object({
   recall: z.boolean().default(true),
   recallMaxMemories: z.number().default(4),
   recallMaxBytes: z.number().default(3000),
+  recallSessionMaxBytes: z.number().default(12000),
   recallTimeoutMs: z.number().default(6000),
   recallProvider: z.string(),
   recallModel: z.string(),

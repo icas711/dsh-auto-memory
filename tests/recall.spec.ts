@@ -189,6 +189,76 @@ describe('createRecaller', () => {
     expect(third).not.toBeNull()
   })
 
+  describe('П.5: кумулятивный бюджет recall на сессию', () => {
+    const BODY = 'слово '.repeat(60) // ~360 B тела: один показ ≈ 0.6–0.7 KB текста
+    beforeEach(async () => {
+      await store.write({ name: 'm1', description: 'факт один про закупки', type: 'project', body: BODY }, 'project', '/work/proj')
+      await store.write({ name: 'm2', description: 'факт два про закупки', type: 'project', body: BODY }, 'project', '/work/proj')
+      await store.write({ name: 'm3', description: 'факт три про закупки', type: 'project', body: BODY }, 'project', '/work/proj')
+    })
+    /** Селектор возвращает очередное имя из списка (по одному показу за вызов). */
+    const seq = (call: { n: number }, names: string[]): RecallSelector => async () => {
+      const name = names[Math.min(call.n, names.length - 1)]!
+      call.n += 1
+      return JSON.stringify([name])
+    }
+    const opts5 = (sessionBytes: number): RecallOptions => ({ ...options, recallMaxBytes: 1200, recallSessionMaxBytes: sessionBytes })
+    const textOf = (result: { message: { content: unknown[] } } | null): string =>
+      ((result?.message.content[0] as { text?: string }).text ?? '')
+    /** Размерная примерка: фактические байты одного показа записи m1 (лимиты строятся от неё — без хрупких оценок). */
+    const shownBytesOfM1 = async (): Promise<number> => {
+      const probe = createRecaller(store, opts5(0), pick(['m1']))
+      const result = await probe.recall(agent(), [userMsg('расскажи про дробление закупок') as never], signal())
+      return Buffer.byteLength(textOf(result), 'utf8')
+    }
+
+    it('накопление: после исчерпания бюджета recall ранней отсечкой перестаёт вызывать модель', async () => {
+      const shown1 = await shownBytesOfM1()
+      const call = { n: 0 }
+      const recaller = createRecaller(store, opts5(shown1 * 2), seq(call, ['m1', 'm2', 'm3']))
+      const first = await recaller.recall(agent(), [userMsg('расскажи про дробление закупок') as never], signal())
+      expect(first?.picked).toEqual(['m1'])
+      const second = await recaller.recall(agent(), [userMsg('что ещё известно про закупки') as never], signal())
+      expect(second?.picked).toEqual(['m2'])
+      // суммарно ровно 2 × показ ≥ лимита → третий recall отсекается ДО вызова модели
+      const third = await recaller.recall(agent(), [userMsg('и что в итоге по закупкам') as never], signal())
+      expect(third).toBeNull()
+      expect(call.n).toBe(2)
+    })
+
+    it('отсечка на середине: остаток < 512 B — модель вызвана, но показ не состоялся', async () => {
+      const shown1 = await shownBytesOfM1()
+      const call = { n: 0 }
+      const recaller = createRecaller(store, opts5(shown1 * 2 + 100), seq(call, ['m1', 'm2', 'm3']))
+      await recaller.recall(agent(), [userMsg('расскажи про дробление закупок') as never], signal())
+      await recaller.recall(agent(), [userMsg('что ещё известно про закупки') as never], signal())
+      // остаток 100 B < 512 → effective < 512 уже после вызова модели
+      const third = await recaller.recall(agent(), [userMsg('и что в итоге по закупкам') as never], signal())
+      expect(third).toBeNull()
+      expect(call.n).toBe(3)
+    })
+
+    it('cleanup сбрасывает кумулятивный бюджет сессии', async () => {
+      const shown1 = await shownBytesOfM1()
+      const call = { n: 0 }
+      const recaller = createRecaller(store, opts5(shown1), seq(call, ['m1', 'm2', 'm3']))
+      expect((await recaller.recall(agent(), [userMsg('расскажи про дробление закупок') as never], signal()))?.picked).toEqual(['m1'])
+      expect(await recaller.recall(agent(), [userMsg('что ещё известно про закупки') as never], signal())).toBeNull() // бюджет исчерпан
+      recaller.cleanup('s1')
+      const fresh = await recaller.recall(agent(), [userMsg('и что в итоге по закупкам') as never], signal())
+      expect(fresh).not.toBeNull() // бюджет новый, surfaced чист → показ снова возможен
+    })
+
+    it('0 = выключено: recall работает без кумулятивного лимита', async () => {
+      const call = { n: 0 }
+      const off: RecallOptions = { ...options, recallMaxBytes: 1200, recallSessionMaxBytes: 0 }
+      const recaller = createRecaller(store, off, seq(call, ['m1', 'm2', 'm3']))
+      expect((await recaller.recall(agent(), [userMsg('расскажи про дробление закупок') as never], signal()))?.picked).toEqual(['m1'])
+      expect((await recaller.recall(agent(), [userMsg('что ещё известно про закупки') as never], signal()))?.picked).toEqual(['m2'])
+      expect((await recaller.recall(agent(), [userMsg('и что в итоге по закупкам') as never], signal()))?.picked).toEqual(['m3'])
+    })
+  })
+
   it('не вызывает модель без нового пользовательского текста, для коротких фраз, для субагентов и при выключенном recall', async () => {
     let calls = 0
     const counting: RecallSelector = async () => { calls += 1; return '["language"]' }

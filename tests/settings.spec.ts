@@ -51,6 +51,18 @@ describe('settings 纯函数层', () => {
   it('SETTABLE_FIELDS 白名单不含 memoryDir(运行时设置不可改记忆根)', () => {
     expect(Object.keys(SETTABLE_FIELDS).includes('memoryDir')).toBe(false)
   })
+  it('П.5: recallSessionMaxBytes валиден (0 = выкл), диапазон соблюдён', async () => {
+    // свежие каталоги на кейс: applySettings мерджит с файлом, накопление смешало бы кейсы
+    const case1 = await fsp.mkdtemp(join(tmpdir(), 'dsh-settings-p5-'))
+    expect((await applySettings(case1, { recallSessionMaxBytes: 8000 })).recallSessionMaxBytes).toBe(8000)
+    const case2 = await fsp.mkdtemp(join(tmpdir(), 'dsh-settings-p5-'))
+    expect((await applySettings(case2, { recallSessionMaxBytes: 0 })).recallSessionMaxBytes).toBe(0) // 0 = выключено — валидно
+    const case3 = await fsp.mkdtemp(join(tmpdir(), 'dsh-settings-p5-'))
+    expect((await applySettings(case3, { recallSessionMaxBytes: -1 })).recallSessionMaxBytes).toBeUndefined() // вне диапазона
+    const case4 = await fsp.mkdtemp(join(tmpdir(), 'dsh-settings-p5-'))
+    expect((await applySettings(case4, { recallSessionMaxBytes: 1.5 })).recallSessionMaxBytes).toBeUndefined() // не целое
+    for (const dir of [case1, case2, case3, case4]) await fsp.rm(dir, { recursive: true, force: true })
+  })
 })
 
 describe('config 路由(memory-api 挂载)', () => {

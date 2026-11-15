@@ -32,6 +32,7 @@ export const SETTABLE_FIELDS = {
   recall: { kind: 'boolean' },
   recallMaxMemories: { kind: 'number', min: 1, max: 10, step: 1 },
   recallMaxBytes: { kind: 'number', min: 512, max: 16_384, step: 256 },
+  recallSessionMaxBytes: { kind: 'number', min: 0, max: 65_536, step: 512 },
 } as const
 
 export type SettableField = keyof typeof SETTABLE_FIELDS

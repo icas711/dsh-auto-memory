@@ -55,6 +55,8 @@ export interface RecallOptions {
   enableSharedScope?: boolean
   /** 1.11.0: подмешивать project-память других рабочих областей того же владельца (по умолчанию да). */
   recallOtherProjects?: boolean
+  /** П.5 (v1.12): кумулятивный бюджет recall на сессию (байт); `0` = выключено. */
+  recallSessionMaxBytes?: number
 }
 
 /** Минимальная форма агента, нужная recall (совместима с настоящим Agent; удобно подставлять заглушки в тестах). */
@@ -252,6 +254,8 @@ function recallSource(): UserMessage['source'] {
 export function createRecaller(baseStore: MemoryStore, options: RecallOptions, select: RecallSelector, getRecentTools?: (sessionId: string) => readonly string[]): Recaller {
   /** sessionId → уже показанные `${scope}:${name}`. */
   const surfaced = new Map<string, Set<string>>()
+  /** П.5: sessionId → суммарные байты recall, уже показанные в сессии (кумулятивный бюджет). */
+  const shownBytes = new Map<string, number>()
 
   return {
     recall: async (agent, messages, signal) => {
@@ -261,6 +265,8 @@ export function createRecaller(baseStore: MemoryStore, options: RecallOptions, s
         if (depth > 0) return null // субагент: у родительской сессии контекст уже есть, повторный recall не нужен
         const query = latestUserText(messages)
         if (query === undefined || query.length < MIN_QUERY_CHARS) return null
+        // П.5: кумулятивный бюджет сессии исчерпан → recall тихо пропускается (fail-open)
+        if ((options.recallSessionMaxBytes ?? 0) > 0 && (shownBytes.get(agent.session.id) ?? 0) >= options.recallSessionMaxBytes!) return null
 
         const cwd = agent.session.header.cwd
         // 1.8.0: личные слои берутся для логина владельца сессии; общий слой одинаков для всех (кандидаты исключает isInjectable)
@@ -310,8 +316,16 @@ export function createRecaller(baseStore: MemoryStore, options: RecallOptions, s
 
         const picked = parseSelection(raw, shortlisted, maxMemories)
         if (picked.length === 0) return null
-        const { text, included } = renderRecallBlock(picked, Math.max(512, options.recallMaxBytes ?? 3000))
+        // П.5: кумулятивный бюджет сессии — берём min(per-message, session-остаток);
+        // `0` у recallSessionMaxBytes выключает кумулятивный лимит (Infinity)
+        const sessionLimit = (options.recallSessionMaxBytes ?? 0) > 0
+          ? options.recallSessionMaxBytes! - (shownBytes.get(agent.session.id) ?? 0)
+          : Infinity
+        const effective = Math.max(0, Math.min(Math.max(512, options.recallMaxBytes ?? 3000), sessionLimit))
+        if (effective < 512) return null
+        const { text, included } = renderRecallBlock(picked, effective)
         if (included.length === 0) return null
+        shownBytes.set(agent.session.id, (shownBytes.get(agent.session.id) ?? 0) + byteLength(text))
 
         // Помечаем как показанное + учитываем одно чтение (счётчик ссылок для политики забывания; сбой тихо игнорируется)
         for (const record of included) {
@@ -329,7 +343,10 @@ export function createRecaller(baseStore: MemoryStore, options: RecallOptions, s
         return null // fail-open
       }
     },
-    cleanup: sessionId => { surfaced.delete(sessionId) },
+    cleanup: sessionId => {
+      surfaced.delete(sessionId)
+      shownBytes.delete(sessionId) // П.5: кумулятивный бюджет сессии сбрасывается на session/disposed
+    },
   }
 }
 

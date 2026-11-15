@@ -34,6 +34,7 @@ Hardening for the multi-user web build (replacing the built-in memory).
 
 ### Added (v1.12)
 - П.1: human memory age in recall — header shows `updated today / yesterday / N days ago` instead of an ISO date, and memories older than a day carry a one-line caveat `(This memory is N days old — verify before relying on it.)`; caveat bytes count against the recall block budget (new `src/age.ts`, pure functions).
+- П.2: "verify before recommending" discipline in prompts — `MEMORY_POLICY_TEXT` gains a "Recalled memories are claims from the past" section (check the file exists / grep before recommending; trust observation over a stale memory and update it; prefer git log for recent-state questions), and the `<memory_recall>` note says memories name facts as they were when written. Index byte budget absorbs the ~400 B policy growth automatically.
 
 ### Documentation
 - `docs/LIMITATIONS.ru.md`: known limitations of 1.7.0–1.9.0 (in Russian) and a pre-rollout checklist.

@@ -109,6 +109,7 @@ describe('renderRecallBlock', () => {
     expect(text.endsWith('</memory_recall>')).toBe(true)
     expect(text).toContain('### Заголовок (user, user, updated today)')
     expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}/) // ISO-дат в рендере больше нет
+    expect(text).toContain('Memories name files and facts as they were when written; verify before relying on them.') // П.2
     expect(text).toContain('Тело записи')
     expect(included).toHaveLength(1)
   })
@@ -119,7 +120,7 @@ describe('renderRecallBlock', () => {
     expect(text).toContain('(This memory is 47 days old — verify before relying on it.)')
     const fresh = renderRecallBlock([rec({ body: 'свежая запись', updatedMs: Date.now() })], 3000).text
     expect(fresh).toContain('updated today')
-    expect(fresh).not.toContain('verify before relying')
+    expect(fresh).not.toContain('days old — verify before relying on it') // П.1: caveat только для старых; П.2-строка RECALL_NOTE не в счёт
   })
   it('П.1: байты caveat входят в бюджет — блок обрезается вместе с note, note выживает', () => {
     const DAY = 86_400_000

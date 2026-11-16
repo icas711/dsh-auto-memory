@@ -23,7 +23,7 @@
   "scripts": {
     "build": "tsdown",
     "test": "vitest run",
-    "prepare": "tsdown"
+    "check:lib": "tsdown && git diff --exit-code -- lib"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.2",

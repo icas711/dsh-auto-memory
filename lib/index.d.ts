@@ -29,6 +29,8 @@ interface Config {
   recallMaxMemories: number;
   /** Бюджет в байтах для сообщения с recall. */
   recallMaxBytes: number;
+  /** П.5 (v1.12): кумулятивный бюджет recall на сессию (байт); 0 = выключено. */
+  recallSessionMaxBytes: number;
   /** Жёсткий таймаут вызова селектора (мс); по таймауту recall тихо пропускается. */
   recallTimeoutMs: number;
   /** Отдельные provider/model для селектора (задавать парой; пусто = модель сессии). */
@@ -46,10 +48,22 @@ interface Config {
   curateMaxMerges?: number;
   /** 1.11.0: recall подмешивает project-память других рабочих областей владельца. */
   recallOtherProjects?: boolean;
-  /** 1.10.0: гейт инъекций — memory_write после чтения внешнего контента идёт через подтверждение человека. */
-  injectionGate?: boolean;
+  /** П.9 (v1.12): режим гейта инъекций — 'candidate' (тихо, статус candidate + метка untrusted) | 'ask' (подтверждение человека) | 'off'. Старые boolean мигрируют: true → 'ask', false → 'off'. */
+  injectionGate?: 'candidate' | 'ask' | 'off' | boolean;
   /** Маски имён инструментов, чтение которых «заражает» ход (пусто = набор по умолчанию). */
   untrustedTools?: string[];
+  /** П.6 (v1.12): верификация путей (claim-verify) в авто-создаваемых project/reference памяти. */
+  verifyWrites?: boolean;
+  /** П.7 (v1.12): dream — глубокий периодический пересмотр памяти; включён по умолчанию (ревизия 2: пишет автоматически). */
+  dream?: boolean;
+  /** Не чаще раза в N часов на слой (штамп .dream). */
+  dreamIntervalHours?: number;
+  /** Жёсткий cap действий записи за один dream-проход. */
+  dreamMaxActions?: number;
+  /** true = режим превью: предложения только в лог (по умолчанию false — dream пишет). */
+  dreamDryRun?: boolean;
+  /** Сколько последних сессий читать для дайджеста. */
+  dreamTranscripts?: number;
 }
 declare const Config: z<Config>;
 declare function apply(ctx: Context, config: Config): void;

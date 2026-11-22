@@ -6,13 +6,14 @@ All notable changes to this project are documented here. The format follows
 the [GitHub Releases](https://github.com/AskTheWay/dsh-auto-memory/releases)
 page (generated from this file at publish time).
 
-## [Unreleased]
+## [1.13.0] - 2026-11-22
 
 ### Added
 - Restricted panel mode for non-admins in the multi-user web build: instead of a blanket 403, an identified non-admin now sees **only their own records** — their personal layers (user scope and their own workspace project layers) plus their own shared-layer records (`author` = their login), shown with title and description and expandable to the full body. From actions, they can **delete their own records**; shared records only while still unapproved (`candidate`/`disputed`) — approved and other people's records are deleted by an admin (the rule is enforced by the store, the single permission point). Admin sections (stats, health, settings, Claude import, AGENTS.md export) are hidden and their routes keep answering 403; other people's records — including approved shared ones visible in injections — never enter the non-admin panel, and the shared-layer index text is withheld (it lists other people's rows). Unidentified requests still get 403 (fail-closed, as in 1.10.0). Panel dictionaries extended (ru/en/zh); `docs/LIMITATIONS.ru.md` §3 updated.
 
 ### Changed
 - Panel routing (`groups.list`/`memory.read`/`memory.delete`) now resolves the requester's identity per request and serves non-admins from their own `withOwner` store view; the admin and local (no `webAuth`) builds keep the exact previous behavior. `memory.write`, settings, import, export, audit and health routes remain admin-only from the panel (an employee's agent keeps writing memories via tools as before).
+- The built `lib/` bundles are committed again (removed from `.gitignore`): the dsh plugin install resolves GitHub packages to the git tarball, so without committed `lib/` a fresh install would run a stale build.
 
 ## [1.11.0] - 2026-11-15
 

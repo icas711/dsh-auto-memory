@@ -155,6 +155,7 @@ const ICONS = {
   chevron: ['m9 6 6 6-6 6'],
   close: ['M6 6l12 12', 'M18 6 6 18'],
   user: ['M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2', 'M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z'],
+  users: ['M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2', 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z', 'M22 21v-2a4 4 0 0 0-3-3.87', 'M16 3.13a4 4 0 0 1 0 7.75'],
   folder: ['M3 7a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z'],
   chart: ['M4 20V10', 'M10 20V4', 'M16 20v-7', 'M22 20H2'],
   target: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z', 'M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z', 'M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z'],
@@ -761,6 +762,13 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
   const [health, setHealth] = useState<HealthReportFace | null>(null)
   /** 设置中心(1.4.0;旧宿主无路由时 null → 设置卡不显示)。 */
   const [settings, setSettings] = useState<SettingsFace | null>(null)
+  /**
+   * Ограниченный режим не-админа (сервер отдаёт restricted в groups.list): видны только СВОИ
+   * записи (личные слои + свои записи общего слоя), из действий — просмотр текста и удаление
+   * (общие — только ещё не одобренные). Админские разделы (аналитика/здоровье/настройки/
+   * импорт/экспорт) скрыты и не запрашиваются — их маршруты для не-админа 403.
+   */
+  const [restricted, setRestricted] = useState(false)
   /** Claude 可同步条数(watcher 透传;undefined = 旧宿主/未扫描,不显示提示)。 */
   const [claudePending, setClaudePending] = useState<number | undefined>(undefined)
   /** 导出 AGENTS.md 的成功提示(导出桥 1.2.0)。 */
@@ -772,6 +780,8 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
 
   const load = useCallback(async () => {
     setError(false)
+    /** Ограниченный режим из свежего ответа (локальная копия: state ещё не обновился). */
+    let isRestricted = false
     try {
       const data = await list()
       setGroups(data.groups as PanelGroup[])
@@ -780,11 +790,22 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
       setBudgetBytes(data.budgetBytes ?? data.maxBytes)
       // Claude 可同步条数(watcher 透传;旧宿主无该字段 = undefined 不提示)
       setClaudePending(data.claudeImportPending)
+      // Ограниченный режим не-админа (restricted из groups.list)
+      isRestricted = data.restricted === true
+      setRestricted(isRestricted)
       setNow(Date.now())
     } catch {
       setError(true)
     }
-    // 三路并行(审查 minor:串行时大库每次操作双倍全扫延迟)
+    // 三路并行(审查 minor:串行时大库每次操作双倍全扫延迟);
+    // ограниченному режиму админские источники не запрашиваем (маршруты 403):
+    // прежние данные (если роль сменилась на ходу) сбрасываем — вкладки скрыты
+    if (isRestricted) {
+      setStats(null)
+      setHealth(null)
+      setSettings(null)
+      return
+    }
     const [statsRes, healthRes, settingsRes] = await Promise.allSettled([auditStats(), healthReport(), configGet()])
     if (statsRes.status === 'fulfilled') setStats(statsRes.value)
     if (healthRes.status === 'fulfilled') setHealth(healthRes.value)
@@ -908,9 +929,27 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
   /** 非当前工作区的项目组没有 cwd,读写必然 400:UI 直接呈现只读,而不是点了报错。 */
   const canWrite = (group: PanelGroup): boolean => group.scope === 'user' || group.current === true
 
+  /**
+   * Чтение тела записи. Полный режим: как раньше (личный user-слой + текущая рабочая область).
+   * Ограниченный режим дополнительно разрешает общий слой — сервер кладёт туда только СВОИ
+   * записи автора (тело читать можно, удалить — только пока запись не одобрена).
+   */
+  const canRead = (group: PanelGroup): boolean => canWrite(group) || group.scope === 'shared'
+
+  /**
+   * Удаление. Полный режим (админ): личные группы — как раньше; общие записи (если
+   * появятся в панели админа) — любые. Ограниченный режим: свои личные записи — всегда;
+   * свои записи общего слоя — только ещё не одобренные (candidate/disputed): одобренные
+   * удаляет админ (то же правило проверит store — единая точка).
+   */
+  const canDelete = (group: PanelGroup, memory: PanelMemory): boolean => {
+    if (group.scope === 'shared') return restricted ? memory.status === 'candidate' || memory.status === 'disputed' : true
+    return canWrite(group)
+  }
+
   /** 卡片正文展开/收起(懒加载 + 缓存;只读组没有 cwd,不允许展开)。 */
   const toggleBody = (group: PanelGroup, memory: PanelMemory): void => {
-    if (!canWrite(group)) return
+    if (!canRead(group)) return
     const key = `${group.key}\u0000${memory.name}`
     const cached = bodies[key]
     if (cached?.body !== undefined) {
@@ -989,8 +1028,9 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
   const totalMuted = groups.reduce((sum, group) => sum + group.memories.filter(m => m.disabled).length, 0)
   const totalStale = groups.reduce((sum, group) => sum + group.memories.filter(m => m.stale && !m.disabled).length, 0)
   // 一次注入只含"用户层 + 当前项目层";其他工作区的索引不计入,不能用全库字节数
+  // (ограниченный режим: общий слой тоже инъекцируется в его сессии — считаем)
   const injectedBytes = groups.reduce((sum, group) =>
-    sum + (group.scope === 'user' || group.current === true ? group.indexBytes : 0), 0)
+    sum + (group.scope === 'user' || group.scope === 'shared' || group.current === true ? group.indexBytes : 0), 0)
   const totalUsage = injectedBytes / budgetBytes
   /** 顶条构成显示(1.6.0 透明化):固定开销 = maxBytes − 净预算,前端算零后端改动;
    *  旧宿主无 budgetBytes 字段(回退=maxBytes)时差值为 0,自动降级单段显示 */
@@ -999,14 +1039,16 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
   const fixedPct = maxBytes > 0 ? Math.min(100, (fixedOverhead / maxBytes) * 100) : 0
   const idxPct = maxBytes > 0 ? Math.min(100 - fixedPct, (injectedBytes / maxBytes) * 100) : 0
   const userCount = groups.filter(g => g.scope === 'user').reduce((sum, group) => sum + group.memories.length, 0)
-  const projectCount = total - userCount
+  const sharedCount = groups.filter(g => g.scope === 'shared').reduce((sum, group) => sum + group.memories.length, 0)
+  const projectCount = total - userCount - sharedCount
   const visibleCount = visibleGroups?.reduce((sum, group) => sum + group.memories.length, 0) ?? 0
   const filtering = filter.trim().length > 0 || typeFilter !== 'all' || scopeFilter !== 'all'
 
   /** 一个分组(可折叠):组头 + 注入预算/索引预览 + 紧凑记忆行。 */
   const renderGroup = (group: PanelGroup): ReactNode => {
-    const readonly = !canWrite(group)
-    const injected = group.scope === 'user' || group.current === true
+    const readonly = !canRead(group)
+    const isShared = group.scope === 'shared'
+    const injected = group.scope === 'user' || isShared || group.current === true
     const usage = injected ? group.indexBytes / budgetBytes : 0
     const hot = usage > 0.8
     const pinnedCount = group.memories.filter(m => m.pinned).length
@@ -1037,15 +1079,17 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
           aria-expanded={!collapsed}
           onClick={() => { setClosedGroups(previous => ({ ...previous, [group.key]: !collapsed })) }}
         >
-          <span className="dam-group-icon" aria-hidden="true"><Icon name={group.scope === 'user' ? 'user' : 'folder'} size={14} /></span>
+          <span className="dam-group-icon" aria-hidden="true"><Icon name={group.scope === 'user' ? 'user' : isShared ? 'users' : 'folder'} size={14} /></span>
           <span className="dam-group-name">
             <span className="dam-group-title" title={group.slug}>
-              {group.scope === 'user' ? t('userScopeShort') : projectLabel}
+              {group.scope === 'user' ? t('userScopeShort') : isShared ? t('sharedScopeShort') : projectLabel}
             </span>
             <span className="dam-group-sub">
               {group.scope === 'user'
                 ? t('userScopeHint')
-                : `${t('projectScope')} · ${group.current === true ? t('currentBadge') : t('readonlyBadge')}`}
+                : isShared
+                  ? t('sharedScopeHint')
+                  : `${t('projectScope')} · ${group.current === true ? t('currentBadge') : t('readonlyBadge')}`}
             </span>
           </span>
           <span className="dam-group-meta">
@@ -1082,8 +1126,16 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
                 const confirming = deletingName === memory.name
                 const bodyState = bodies[`${group.key}\u0000${memory.name}`]
                 const expanded = bodyState?.body !== undefined
-                const actionsDisabled = busy || importer !== null || readonly
+                const actionsDisabled = busy || importer !== null
+                // Ограниченный режим: из действий остаются просмотр текста и удаление своих;
+                // одобренную (и superseded) свою запись общего слоя удаляет только админ
                 const readonlyHint = readonly ? t('projectNeedsSession') : undefined
+                const deletable = canDelete(group, memory)
+                const deleteHint = deletable
+                  ? t('delete')
+                  : readonly
+                    ? t('projectNeedsSession')
+                    : t('deleteRestrictedHint')
                 if (editing !== null && editing.memory.name === memory.name && editing.group.key === group.key) {
                   return (
                     <MemoryEditor
@@ -1167,47 +1219,51 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
                         type="button"
                         className="dam-icon-btn"
                         data-on={expanded ? '1' : '0'}
-                        disabled={actionsDisabled}
+                        disabled={actionsDisabled || readonly}
                         title={readonlyHint ?? (expanded ? t('hideBody') : t('showBody'))}
                         aria-label={expanded ? t('hideBody') : t('showBody')}
                         onClick={() => { toggleBody(group, memory) }}
                         data-tone="brand"
                       ><Icon name="book" /></button>
-                      <button
-                        type="button"
-                        className="dam-icon-btn"
-                        disabled={actionsDisabled}
-                        title={readonlyHint ?? t('edit')}
-                        aria-label={t('edit')}
-                        onClick={() => { void openEditor(group, memory) }}
-                        data-tone="brand"
-                      ><Icon name="edit" /></button>
-                      <button
-                        type="button"
-                        className="dam-icon-btn"
-                        data-on={memory.pinned ? '1' : '0'}
-                        disabled={actionsDisabled}
-                        title={readonlyHint ?? (memory.pinned ? t('unpinAction') : t('pinAction'))}
-                        aria-label={memory.pinned ? t('unpinAction') : t('pinAction')}
-                        onClick={() => { toggleFlag(group, memory, 'pinned') }}
-                        data-tone="warn"
-                      ><Icon name="pin" /></button>
-                      <button
-                        type="button"
-                        className="dam-icon-btn"
-                        data-on={memory.disabled ? '1' : '0'}
-                        disabled={actionsDisabled}
-                        title={readonlyHint ?? (memory.disabled ? t('unmuteAction') : t('muteAction'))}
-                        aria-label={memory.disabled ? t('unmuteAction') : t('muteAction')}
-                        onClick={() => { toggleFlag(group, memory, 'disabled') }}
-                        data-tone="muted"
-                      ><Icon name={memory.disabled ? 'unmute' : 'mute'} /></button>
+                      {!restricted && (
+                        <>
+                          <button
+                            type="button"
+                            className="dam-icon-btn"
+                            disabled={actionsDisabled || readonly}
+                            title={readonlyHint ?? t('edit')}
+                            aria-label={t('edit')}
+                            onClick={() => { void openEditor(group, memory) }}
+                            data-tone="brand"
+                          ><Icon name="edit" /></button>
+                          <button
+                            type="button"
+                            className="dam-icon-btn"
+                            data-on={memory.pinned ? '1' : '0'}
+                            disabled={actionsDisabled || readonly}
+                            title={readonlyHint ?? (memory.pinned ? t('unpinAction') : t('pinAction'))}
+                            aria-label={memory.pinned ? t('unpinAction') : t('pinAction')}
+                            onClick={() => { toggleFlag(group, memory, 'pinned') }}
+                            data-tone="warn"
+                          ><Icon name="pin" /></button>
+                          <button
+                            type="button"
+                            className="dam-icon-btn"
+                            data-on={memory.disabled ? '1' : '0'}
+                            disabled={actionsDisabled || readonly}
+                            title={readonlyHint ?? (memory.disabled ? t('unmuteAction') : t('muteAction'))}
+                            aria-label={memory.disabled ? t('unmuteAction') : t('muteAction')}
+                            onClick={() => { toggleFlag(group, memory, 'disabled') }}
+                            data-tone="muted"
+                          ><Icon name={memory.disabled ? 'unmute' : 'mute'} /></button>
+                        </>
+                      )}
                       <button
                         type="button"
                         className="dam-icon-btn"
                         data-danger="1"
-                        disabled={actionsDisabled}
-                        title={readonlyHint ?? t('delete')}
+                        disabled={actionsDisabled || !deletable}
+                        title={deleteHint}
                         aria-label={t('delete')}
                         onClick={() => { setDeletingName(memory.name) }}
                       ><Icon name="trash" /></button>
@@ -1223,14 +1279,15 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
                       </div>
                     )}
 
-                    {/* 可信状态操作(1.0.0):candidate→验证/质疑;disputed/superseded→恢复注入 */}
-                    {memory.status === 'candidate' && !readonly && (
+                    {/* 可信状态操作(1.0.0):candidate→验证/质疑;disputed/superseded→恢复注入。
+                        Ограниченный режим скрыт: статусные переходы — работа админа/модерация */}
+                    {!restricted && memory.status === 'candidate' && !readonly && (
                       <div className="dam-status-actions">
                         <button type="button" className="dam-btn dam-btn-primary" disabled={busy || actionsDisabled} title={t('statusTipCandidate')} onClick={() => { setStatus(group, memory, 'verified') }}>{t('verifyAction')}</button>
                         <button type="button" className="dam-btn" disabled={busy || actionsDisabled} onClick={() => { setStatus(group, memory, 'disputed') }}>{t('disputeAction')}</button>
                       </div>
                     )}
-                    {(memory.status === 'disputed' || memory.status === 'superseded') && !readonly && (
+                    {!restricted && (memory.status === 'disputed' || memory.status === 'superseded') && !readonly && (
                       <div className="dam-status-actions">
                         {/* 恢复 = 回到 candidate 待验证(而非直接 verified)——
                             争议内容的复核必须重新过验证,审查确认 verified 太强 */}
@@ -1413,33 +1470,41 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
           </span>
         </div>
         <div className="dam-header-actions">
-          {/* 反向导出桥(1.2.0):信任态记忆 → AGENTS.md 片段,复制到剪贴板 */}
-          <button
-            type="button"
-            className="dam-btn dam-btn-ghost"
-            disabled={busy}
-            title={t('exportTip')}
-            aria-label={t('exportAction')}
-            onClick={() => {
-              void exportAgents()
-                .then(res => navigator.clipboard.writeText(res.content))
-                .then(() => { setActionError(null); setExportNote(t('exportDone')) })
-                .catch(() => { setExportNote(null); setActionError(t('exportFailed')) })
-            }}
-          ><Icon name="upload" size={13} /></button>
+          {/* 反向导出桥(1.2.0):信任态记忆 → AGENTS.md 片段,复制到剪贴板。
+              Ограниченный режим: админские действия скрыты, остаётся только «Обновить» */}
+          {!restricted && (
+            <button
+              type="button"
+              className="dam-btn dam-btn-ghost"
+              disabled={busy}
+              title={t('exportTip')}
+              aria-label={t('exportAction')}
+              onClick={() => {
+                void exportAgents()
+                  .then(res => navigator.clipboard.writeText(res.content))
+                  .then(() => { setActionError(null); setExportNote(t('exportDone')) })
+                  .catch(() => { setExportNote(null); setActionError(t('exportFailed')) })
+              }}
+            ><Icon name="upload" size={13} /></button>
+          )}
           <button type="button" className="dam-btn dam-btn-ghost" onClick={() => { void load() }} disabled={busy} aria-label={t('refresh')} title={t('refresh')}>
             <Icon name="refresh" size={13} />
           </button>
-          <button
-            type="button"
-            className="dam-btn dam-btn-primary"
-            disabled={busy || importer !== null || editing !== null}
-            onClick={openImporter}
-          >
-            <Icon name="download" size={13} /> {t('importBtn')}
-          </button>
+          {!restricted && (
+            <button
+              type="button"
+              className="dam-btn dam-btn-primary"
+              disabled={busy || importer !== null || editing !== null}
+              onClick={openImporter}
+            >
+              <Icon name="download" size={13} /> {t('importBtn')}
+            </button>
+          )}
         </div>
       </header>
+
+      {/* Ограниченный режим не-админа: пояснение, что здесь только свои записи */}
+      {restricted && <div className="dam-restricted-note">{t('restrictedModeHint')}</div>}
 
       {/* tab 导航 + 右侧全局信号(索引占用;下划线式与列表级 segment 区分)。
           至少一个可选 tab 才渲染,否则退化为纯列表(最旧宿主) */}
@@ -1498,7 +1563,13 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
               )}
             </div>
             <div className="dam-segment" role="group" aria-label={t('overviewMemories')}>
-              {([['all', t('allScopes'), total], ['user', t('userScopeShort'), userCount], ['project', t('projectScope'), projectCount]] as const).map(([key, label, count]) => (
+              {([
+                ['all', t('allScopes'), total],
+                ['user', t('userScopeShort'), userCount],
+                ['project', t('projectScope'), projectCount],
+                // Ограниченный режим: свои записи общего слоя — отдельный фильтр
+                ...(restricted && sharedCount > 0 ? [['shared', t('sharedScopeShort'), sharedCount] as [string, string, number]] : []),
+              ] as Array<[string, string, number]>).map(([key, label, count]) => (
                 <button
                   type="button"
                   key={key}
@@ -1543,9 +1614,11 @@ export function MemoryPage({ t, list, read, write, del, currentCwd, importScan, 
               <h3>{t('emptyTitle')}</h3>
               <p>{t('emptyStep1')}</p>
               <p className="dam-note">{t('emptyStep2')} · {t('emptyStep3')}</p>
-              <button type="button" className="dam-btn dam-btn-primary" disabled={busy || importer !== null || editing !== null} onClick={openImporter}>
-                <Icon name="download" size={13} /> {t('importBtn')}
-              </button>
+              {!restricted && (
+                <button type="button" className="dam-btn dam-btn-primary" disabled={busy || importer !== null || editing !== null} onClick={openImporter}>
+                  <Icon name="download" size={13} /> {t('importBtn')}
+                </button>
+              )}
             </div>
           )}
 

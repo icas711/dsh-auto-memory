@@ -39,7 +39,7 @@ export const inject = ['slots', 'locale', 'sessions']
 
 /** 面板可用的操作面(宿主半路由的浏览器侧封装;组件永不直接拿 ctx)。 */
 export interface MemoryFace {
-  list: () => Promise<{ groups: unknown[]; maxBytes: number; budgetBytes?: number; claudeImportPending?: number }>
+  list: () => Promise<{ groups: unknown[]; maxBytes: number; budgetBytes?: number; claudeImportPending?: number; /** Ограниченный режим не-админа: только свои записи, из действий — просмотр и удаление. */ restricted?: boolean }>
   read: (query: { name: string; scope: string; cwd?: string }) => Promise<{ body: string; pinned: boolean; disabled: boolean }>
   write: (payload: { cwd?: string; scope: string; name: string; title?: string; description: string; type: string; body: string; pinned?: boolean; disabled?: boolean; status?: string; supersedes?: string; validUntilMs?: number }) => Promise<Response>
   del: (payload: { cwd?: string; scope: string; name: string }) => Promise<Response>
@@ -100,7 +100,7 @@ function memoryFace(ctx: ClientContext): MemoryFace {
       const query = cwd === undefined ? '' : `?cwd=${encodeURIComponent(cwd)}`
       const response = await fetch(`${BASE}/groups.list${query}`, { headers: { 'cache-control': 'no-store' } })
       if (!response.ok) throw new Error(`groups.list HTTP ${String(response.status)}`)
-      return (await response.json()) as { groups: unknown[]; maxBytes: number; budgetBytes?: number }
+      return (await response.json()) as { groups: unknown[]; maxBytes: number; budgetBytes?: number; claudeImportPending?: number; restricted?: boolean }
     },
     read: async ({ name, scope, cwd }) => {
       const params = new URLSearchParams({ name, scope })
@@ -258,6 +258,10 @@ export const PANEL_CSS = `
 .dam-group[data-scope="user"]{border-left-color:var(--dsw-alias-brand-primary,#4d76e6);}
 .dam-group[data-scope="project"]{border-left-color:#0d9488;}
 .dam-group[data-scope="project"][data-current="1"]{border-left-color:#16a34a;}
+/* Общий слой (ограниченный режим не-админа): нейтральный серый — без нового цветового тона
+   (фиолетовый уже браковался ΔE-проверкой рядом с синим, 1.5.0), отличим по светлоте */
+.dam-group[data-scope="shared"]{border-left-color:#94a3b8;}
+.dam-group[data-scope="shared"] .dam-group-icon{color:#94a3b8;}
 .dam-group[data-current="1"]>.dam-group-head{background:linear-gradient(90deg,color-mix(in srgb,var(--dsw-alias-state-success-primary,#16a34a) 5%,transparent),transparent 55%);}
 .dam-group-head{display:grid;grid-template-columns:18px minmax(0,1fr) auto 16px;gap:10px;align-items:center;width:100%;padding:11px 14px;border:0;background:transparent;color:inherit;font-family:inherit;text-align:left;cursor:pointer;}
 .dam-group-head:hover{background:var(--dsw-alias-interactive-bg-hover);}
@@ -402,6 +406,8 @@ export const PANEL_CSS = `
 .dam-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
 .dam-err{color:var(--dsw-alias-state-warn-primary,#d97706);font-size:12px;}
 .dam-banner{padding:8px 12px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d97706) 35%,transparent);border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d97706) 7%,transparent);}
+/* Ограниченный режим панели не-админа: нейтральное пояснение под шапкой */
+.dam-restricted-note{padding:7px 12px;border:1px dashed var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1);font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-secondary);}
 .dam-empty{display:flex;flex-direction:column;align-items:center;gap:4px;border:1px dashed var(--dsw-alias-border-l2);border-radius:14px;padding:34px 16px;text-align:center;color:var(--dsw-alias-label-secondary);font-size:12.5px;background:var(--dsw-alias-bg-layer-1);}
 .dam-empty-icon{color:color-mix(in srgb,var(--dsw-alias-brand-primary,#4d76e6) 45%,var(--dsw-alias-label-tertiary));margin-bottom:6px;}
 .dam-empty h3{margin:0;font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary);}

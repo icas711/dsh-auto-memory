@@ -553,6 +553,10 @@ export class MemoryStore {
   private readonly baseRoot: string
   /** Корень личных слоёв (user/project): локально = baseRoot; для пользователя = baseRoot/_owners/<key>. */
   private readonly personalRoot: string
+  /** Корень личных слоёв владельца на чтение (панель не-админа сканирует его: user + project этого владельца). */
+  personalRootDir(): string {
+    return this.personalRoot
+  }
   /** 软淘汰阈值(天);0 = 禁用。索引重建时评估:陈旧零引用的记忆从索引隐藏(文件保留)。 */
   private readonly staleSource: number | (() => number)
   private readonly adminSource: readonly string[] | (() => readonly string[])

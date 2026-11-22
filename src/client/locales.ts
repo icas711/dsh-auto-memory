@@ -213,6 +213,10 @@ export const zh = {
   setDreamDryRunHint: '开启后只把建议写入日志,不实际写盘',
   setDreamTranscripts: 'Dream 会话数',
   setDreamTranscriptsHint: '构建摘要时读取的最近会话数量',
+  sharedScopeShort: '共享层',
+  sharedScopeHint: '全员可见；仅未批准的自己的记录可删除',
+  restrictedModeHint: '受限模式：只显示你自己的记录——可查看标题、摘要与正文，并可删除（共享记录仅未批准状态可删；已批准的由管理员删除）',
+  deleteRestrictedHint: '已批准的共享记录由管理员删除',
 } as const
 
 export type PluginMemoryLocaleKey = keyof typeof zh
@@ -427,6 +431,10 @@ export const en: Record<PluginMemoryLocaleKey, string> = {
   setDreamDryRunHint: 'When on, proposals go to the log only — nothing is written',
   setDreamTranscripts: 'Dream sessions',
   setDreamTranscriptsHint: 'How many recent sessions are summarized into the digest',
+  sharedScopeShort: 'Shared',
+  sharedScopeHint: 'visible to everyone; only your own unapproved records can be deleted',
+  restrictedModeHint: 'Restricted mode: only your own records — you can view their title, summary and body, and delete them (shared records only while unapproved; approved ones are removed by an admin)',
+  deleteRestrictedHint: 'Approved shared records are removed by an admin',
 }
 
 /**
@@ -643,4 +651,8 @@ export const ru: Record<PluginMemoryLocaleKey, string> = {
   setDreamDryRunHint: 'Включён — предложения только в лог, на диск ничего не пишется',
   setDreamTranscripts: 'Сессии для Dream',
   setDreamTranscriptsHint: 'Сколько последних сессий сводится в дайджест',
+  sharedScopeShort: 'Общий слой',
+  sharedScopeHint: 'видна всем сотрудникам; удалить можно только свои неодобренные записи',
+  restrictedModeHint: 'Ограниченный режим: показаны только ваши записи — можно смотреть название, описание и текст, а также удалять их (общие записи удаляются, пока они не одобрены; одобренные удаляет администратор)',
+  deleteRestrictedHint: 'Одобренные общие записи удаляет администратор',
 }

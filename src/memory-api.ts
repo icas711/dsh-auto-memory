@@ -61,6 +61,8 @@ export interface PanelMemory {
   bytes: number
   /** 导入溯源(仅来源种类;完整 slug/file 不回显给浏览器)。 */
   importedFrom?: 'claude-code'
+  /** Автор записи общего слоя (1.8.0;в панели не-админа — всегда он сам). */
+  author?: string
 }
 
 /** 一组记忆(用户级或某个项目 slug)。 */
@@ -141,6 +143,7 @@ async function readGroup(
       reads: record.reads ?? 0,
       ...(record.updatedMs !== undefined ? { updatedMs: record.updatedMs } : {}),
       ...(record.origin !== undefined ? { importedFrom: record.origin.kind } : {}),
+      ...(record.author !== undefined ? { author: record.author } : {}),
       bytes,
     })
   }
@@ -221,7 +224,7 @@ export function buildHealthReport(entries: Array<{ record: MemoryRecord, scope: 
   // 0.7 是"同义改写=更新"的合并线,0.9 以上才是"两条并存讲同一件事"的嫌疑)
   const byScope = new Map<string, Array<{ record: MemoryRecord, scope: MemoryScope, slug: string }>>()
   for (const e of entries) {
-    const key = `${e.scope} ${e.slug}`
+    const key = `${e.scope}\u0000${e.slug}`
     const list = byScope.get(key) ?? []
     if (list.length < 200) list.push(e)
     byScope.set(key, list)
@@ -261,6 +264,28 @@ export async function scanGroups(rootDir: string, staleAfterDays: number | (() =
 }
 
 /**
+ * Группы не-админа (ограниченный режим панели): его личные слои (user/project из личного
+ * корня владельца) + общий слой, отфильтрованный до его собственных записей (author = логин).
+ * Чужие записи — включая одобренные, которые видны ему в инъекциях — в панель не-админа
+ * не попадают совсем (в UI он видит только название/описание/текст СВОИХ записей).
+ * Индекс общего слоя не отдаём: в нём строки чужих записей (утечка); байты остаются —
+ * общий слой всё же входит в инъекцию его сессий, шкала бюджета должна быть честной.
+ */
+async function scanOwnerGroups(
+  view: MemoryStore,
+  staleAfterDays: number | (() => number),
+  login: string | undefined,
+): Promise<PanelGroup[]> {
+  const groups = await scanGroups(view.personalRootDir(), staleAfterDays)
+  if (login === undefined) return groups // без логина ограниченного режима не бывает
+  const shared = await readGroup(view.dir('shared'), 'shared', '_shared', typeof staleAfterDays === 'number' ? () => staleAfterDays : staleAfterDays, Date.now())
+  shared.indexText = null
+  shared.memories = shared.memories.filter(memory => memory.author === login)
+  if (shared.memories.length > 0) groups.push(shared)
+  return groups
+}
+
+/**
  * 解析条目级导入目标({slug,file} 数组)。undefined → [];畸形 → null(调用方
  * 400)。与 slugs 校验同款 fail-closed 纪律:静默降级成"全部撤销"是最坏方向。
  */
@@ -290,8 +315,9 @@ export function registerMemoryApi(
   // 1.4.0:profile 声明的原始值(live 的回退源)——单字段"重置回 profile
   // 默认"时从这里恢复(config.set 的 null 语义)
   profileDefaults: Record<string, unknown>,
-  // 1.10.0: мост к webAuth хоста. Сервис есть (многопользовательский веб) → маршруты только для админов (иначе 403);
-  // сервиса нет (локальная/одиночная сборка) → поведение прежнее.
+  // 1.10.0: мост к webAuth хоста. Сервис есть (многопользовательский веб) → админ видит панель
+  // целиком, не-админ — ограниченный режим (свои записи: просмотр + удаление); личность не
+  // определена → 403. Сервиса нет (локальная/одиночная сборка) → поведение прежнее.
   identity?: IdentityBridge,
 ): void {
   const connection = ctx.get('connection')
@@ -299,24 +325,50 @@ export function registerMemoryApi(
   const forbidden = (): Response => new Response(JSON.stringify({ error: 'forbidden: memory panel is available to admins only' }), {
     status: 403, headers: { 'content-type': 'application/json' },
   })
-  /** Гейт маршрутов панели: null = пропустить, Response = отказ. Fail-closed: личность не определена → 403. */
-  const gate = async (request: Request): Promise<Response | null> => {
-    if (identity === undefined || !identity.active()) return null
+  /** Зритель запроса: личность, его представление хранилища и режим панели. */
+  interface Viewer {
+    /** Логин (undefined = локальная/одиночная сборка без webAuth). */
+    login: string | undefined
+    admin: boolean
+    /** Представление хранилища: админ/локально — общее (как в 1.10.0); не-админ — его личное (withOwner). */
+    view: MemoryStore
+    /** Ограниченный режим не-админа: только свои записи; из действий — просмотр и удаление. */
+    restricted: boolean
+  }
+  /**
+   * Кем является автор запроса. Админ/локальная сборка — полный режим (панель админа, как раньше);
+   * не-админ — ограниченный режим: свои личные слои + свои записи общего слоя, просмотр
+   * (название/описание/текст своих) и удаление своих (общие — только ещё не одобренные,
+   * единственная точка проверки прав — MemoryStore). Личность не определена → null → 403 (fail-closed, 1.10.0).
+   */
+  const resolveViewer = async (request: Request): Promise<Viewer | null> => {
+    if (identity === undefined || !identity.active()) {
+      return { login: undefined, admin: true, view: store, restricted: false }
+    }
     const who = await identity.identify(request)
-    if (who === undefined) return forbidden()
+    if (who === undefined) return null
     // Роль от хоста авторитетна; если хост её не сообщил — решает представление хранилища (запасной список admins)
     const admin = who.admin ?? store.withOwner(who.login).isAdmin()
-    return admin ? null : forbidden()
+    if (admin) return { login: who.login, admin: true, view: store, restricted: false }
+    return { login: who.login, admin: false, view: store.withOwner(who.login), restricted: true }
   }
-  const register = (route: Parameters<typeof connection.fetch.register>[0]): ReturnType<typeof connection.fetch.register> =>
+  const register = (route: {
+    path: string
+    methods: readonly ('GET' | 'HEAD' | 'POST')[]
+    requestBody: 'buffered'
+    /** Панельные маршруты получают зрителя запроса (личность + его представление хранилища). */
+    fetch: (request: Request, viewer: Viewer) => Promise<Response>
+  }): ReturnType<typeof connection.fetch.register> =>
     connection.fetch.register({
       ...route,
-      fetch: (async (request: Request, ...rest: unknown[]) => {
-        const denied = await gate(request)
-        if (denied !== null) return denied
-        return (route.fetch as (r: Request, ...a: unknown[]) => Promise<Response>)(request, ...rest)
-      }) as typeof route.fetch,
+      fetch: (async (request: Request) => {
+        const viewer = await resolveViewer(request)
+        if (viewer === null) return forbidden()
+        return route.fetch(request, viewer)
+      }) as unknown as Parameters<typeof connection.fetch.register>[0]['fetch'],
     })
+  /** Маршруты, доступные только админу (разделы управления: настройки/импорт/экспорт/статистика/здоровье). */
+  const adminOnly = (viewer: Viewer): Response | null => (viewer.admin ? null : forbidden())
   const home = (config.homeDir as string | undefined) ?? homedir()
   const staleAfterDays = () => (config.staleAfterDays as number | undefined) ?? 0
   // 磁盘覆盖 + profile 默认 → 每字段生效值;顺带同步进 live(GET/Set 后双轨对齐)
@@ -331,7 +383,9 @@ export function registerMemoryApi(
 
   register({
     path: `${BASE}/config.get`, methods: ['GET'], requestBody: 'buffered',
-    fetch: async () => {
+    fetch: async (_request, viewer) => {
+      const denied = adminOnly(viewer)
+      if (denied !== null) return denied
       // 设置中心:当前生效值 + 每字段来源(profile 声明 vs 用户覆盖)。
       // 1.4.0 修复(审查 minor):以磁盘为单一真值源当场重算——启动窗口
       // (index.ts 的异步 loadSettings 未完成)、跨进程写、手改 settings.json
@@ -351,7 +405,9 @@ export function registerMemoryApi(
 
   register({
     path: `${BASE}/config.set`, methods: ['POST'], requestBody: 'buffered',
-    fetch: async (request) => {
+    fetch: async (request, viewer) => {
+      const denied = adminOnly(viewer)
+      if (denied !== null) return denied
       try {
         const patch = (await request.json()) as Record<string, unknown>
         if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
@@ -401,9 +457,14 @@ export function registerMemoryApi(
 
   register({
     path: `${BASE}/groups.list`, methods: ['GET'], requestBody: 'buffered',
-    fetch: async (request) => {
+    fetch: async (request, viewer) => {
       const cwd = new URL(request.url).searchParams.get('cwd') ?? undefined
-      const groups = await scanGroups(rootDir, staleAfterDays())
+      // Не-админ (ограниченный режим): его личные слои + свои записи общего слоя;
+      // админ/локально — общее представление, как в 1.10.0 (без общего слоя — модерация
+      // общего слоя у админа через memory_review, панель не менялась).
+      const groups = viewer.restricted
+        ? await scanOwnerGroups(viewer.view, staleAfterDays(), viewer.login)
+        : await scanGroups(rootDir, staleAfterDays())
       if (cwd !== undefined && cwd.length > 0) {
         const currentSlug = projectKey(cwd)
         for (const group of groups) {
@@ -411,22 +472,34 @@ export function registerMemoryApi(
         }
       }
       // budgetBytes = 索引净预算(已扣写入指导/协议壳);面板用量条与注入同一口径
-      // claudeImportPending = watcher 的 Claude 可同步条数(-1 未知时不显示提示)
-      return json({ groups, maxBytes: config.maxBytes, budgetBytes: indexByteBudget(config.maxBytes), claudeImportPending: claudePending })
+      // claudeImportPending = watcher 的 Claude 可同步条数(-1 未知时不显示提示);
+      // ограниченному режиму подсказка импорта не положена (маршрут импорта админский)
+      return json({
+        groups,
+        maxBytes: config.maxBytes,
+        budgetBytes: indexByteBudget(config.maxBytes),
+        claudeImportPending: viewer.restricted ? -1 : claudePending,
+        restricted: viewer.restricted,
+      })
     },
   })
 
   register({
     path: `${BASE}/memory.read`, methods: ['GET'], requestBody: 'buffered',
-    fetch: async (request) => {
+    fetch: async (request, viewer) => {
       const url = new URL(request.url)
       const name = url.searchParams.get('name') ?? ''
       const scope = (url.searchParams.get('scope') ?? 'user') as MemoryScope
       const cwd = scope === 'project' ? url.searchParams.get('cwd') ?? undefined : undefined
       if (scope === 'project' && cwd === undefined) return json({ error: 'project scope requires cwd' }, 400)
       try {
-        const record = await store.read(name, scope, cwd)
+        const record = await viewer.view.read(name, scope, cwd)
         if (record === null) return json({ error: 'not found' }, 404)
+        // Ограниченный режим: свои записи общего слоя; чужие (в т.ч. одобренные,
+        // видимые в инъекциях) — 404, панель не-админа их не показывает вовсе.
+        if (viewer.restricted && scope === 'shared' && record.author !== viewer.login) {
+          return json({ error: 'not found' }, 404)
+        }
         return json({ name: record.name, title: record.title, description: record.description, type: record.type, body: record.body, pinned: record.pinned === true, disabled: record.disabled === true })
       } catch (error) {
         return json({ error: String(error) }, 400)
@@ -436,7 +509,11 @@ export function registerMemoryApi(
 
   register({
     path: `${BASE}/memory.write`, methods: ['POST'], requestBody: 'buffered',
-    fetch: async (request) => {
+    fetch: async (request, viewer) => {
+      // Ограниченный режим — только просмотр и удаление своих записей; создание/правка
+      // в панели не-админа недоступна (модель его сессий пишет как раньше, через tools).
+      const denied = adminOnly(viewer)
+      if (denied !== null) return denied
       try {
         const body = (await request.json()) as {
           cwd?: string; scope: MemoryScope; name: string; title?: string
@@ -489,7 +566,9 @@ export function registerMemoryApi(
 
   register({
     path: `${BASE}/import.claude.scan`, methods: ['GET'], requestBody: 'buffered',
-    fetch: async () => {
+    fetch: async (_request, viewer) => {
+      const denied = adminOnly(viewer)
+      if (denied !== null) return denied
       // 只读扫描:遍历 ~/.claude/projects/*/memory,返回逐项目/逐条预览(目标层、
       // 导入状态),无任何写副作用——用户在面板确认后才调 import.claude.apply。
       // annotate 阶段读本插件记忆库,给每条补 pending/imported/modified/conflict,
@@ -520,7 +599,9 @@ export function registerMemoryApi(
 
   register({
     path: `${BASE}/import.claude.apply`, methods: ['POST'], requestBody: 'buffered',
-    fetch: async (request) => {
+    fetch: async (request, viewer) => {
+      const denied = adminOnly(viewer)
+      if (denied !== null) return denied
       try {
         const body = (await request.json()) as { items?: unknown, revoke?: unknown, allToUser?: unknown }
         // 与 memory.write 同款严格校验纪律:两项都必须是无歧义的目标数组
@@ -552,7 +633,9 @@ export function registerMemoryApi(
 
   register({
     path: `${BASE}/audit.stats`, methods: ['GET'], requestBody: 'buffered',
-    fetch: async () => {
+    fetch: async (_request, viewer) => {
+      const denied = adminOnly(viewer)
+      if (denied !== null) return denied
       // 注入审计统计(0.9.0):读 audit.jsonl 聚合,坏行已在读取层跳过;
       // 0.9.1 传 store 标注每条记忆的作用域(注入榜 user/project 可分辨)
       const entries = await readAudit(rootDir)
@@ -562,7 +645,9 @@ export function registerMemoryApi(
 
   register({
     path: `${BASE}/health.report`, methods: ['GET'], requestBody: 'buffered',
-    fetch: async () => {
+    fetch: async (_request, viewer) => {
+      const denied = adminOnly(viewer)
+      if (denied !== null) return denied
       // 记忆体检(1.0.0 可信记忆):待验证/僵尸/矛盾三榜,聚合实现在
       // buildHealthReport(纯函数,tests/memory-api.spec.ts 覆盖)
       const all = await scanAllRecords(rootDir)
@@ -572,7 +657,9 @@ export function registerMemoryApi(
 
   register({
     path: `${BASE}/export.agents`, methods: ['GET'], requestBody: 'buffered',
-    fetch: async (request) => {
+    fetch: async (request, viewer) => {
+      const denied = adminOnly(viewer)
+      if (denied !== null) return denied
       // 反向导出桥(1.2.0):信任态记忆 → AGENTS.md 片段(纯文本,复制即用)。
       // 只导信任态(status 缺省/verified)——candidate/disputed 不进指令文件
       const cwd = new URL(request.url).searchParams.get('cwd') ?? undefined
@@ -591,14 +678,17 @@ export function registerMemoryApi(
 
   register({
     path: `${BASE}/memory.delete`, methods: ['POST'], requestBody: 'buffered',
-    fetch: async (request) => {
+    fetch: async (request, viewer) => {
       try {
         const body = (await request.json()) as { cwd?: string; scope: MemoryScope; name: string }
         const cwd = body.scope === 'project' ? body.cwd : undefined
         if (body.scope === 'project' && (cwd === undefined || cwd.length === 0)) {
           return json({ error: 'project scope requires cwd' }, 400)
         }
-        const removed = await store.delete(body.name, body.scope, cwd)
+        // Не-админ удаляет свои записи: личные слои — из его личного корня (view),
+        // общий слой — единственная точка проверки прав в store (только свои ещё
+        // не одобренные; одобренную/чужую store отклонит ошибкой → 400).
+        const removed = await viewer.view.delete(body.name, body.scope, cwd)
         return removed ? json({ ok: true }) : json({ error: 'not found' }, 404)
       } catch (error) {
         return json({ error: String(error) }, 400)

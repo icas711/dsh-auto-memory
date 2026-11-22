@@ -402,15 +402,18 @@ into authenticated web sessions:
 - Non-admins can change or delete only their own not-yet-approved shared entries;
   authorship is stamped by the store and cannot be forged. All of this is enforced in
   the store, not in the tools.
-- Limitation: the web memory panel has no identity yet — it operates on the local
-  (admin) view, so it shows neither per-employee memory nor the shared review queue.
+- Web panel (with `webAuth`): admins see the full local view; identified non-admins
+  get a restricted mode — only their own records (personal layers plus their own
+  shared entries, title/description/body visible) with delete, shared entries only
+  while unapproved. The shared review queue stays in the `memory_review` tool.
 
 ## Ограничения (Limitations)
 
 Известные ограничения версий 1.7.0–1.10.0 — на русском, с чек-листом проверки на стенде:
 [docs/LIMITATIONS.ru.md](docs/LIMITATIONS.ru.md). Главное: плагин не проверен на живом dsh
-(только автотесты со стабами); веб-панель не знает личность пользователя; личность берётся из
-`session.header.owner` — без него сессия считается локальной и получает права админа.
+(только автотесты со стабами); панель админа работает с локальным представлением, а не-админ
+видит в ней только свои записи; личность берётся из `session.header.owner` (для панели — из
+`webAuth`) — без него сессия считается локальной и получает права админа.
 
 ## How it works (60 seconds)
 

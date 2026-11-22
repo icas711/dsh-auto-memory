@@ -1,5 +1,6 @@
 /**
- * 1.10.0 ужесточение под многопользовательский веб: гейт маршрутов панели (только админы, fail-closed),
+ * 1.10.0 ужесточение под многопользовательский веб: гейт маршрутов панели (fail-closed без личности;
+ * с 1.13.0 не-админ получает ограниченный режим — свои записи, просмотр и удаление),
  * мост админов из webAuth, делегированные сессии без owner, гейт инъекций, точное сравнение логинов,
  * дозапись хвоста консолидации на session/disposed.
  */
@@ -90,7 +91,13 @@ describe('гейт маршрутов панели', () => {
     const connection = { fetch: { register: (route: { path: string, fetch: (r: Request) => Promise<Response> }): void => { routes.set(route.path, route.fetch) } } }
     const ctx = { get: (n: string) => (n === 'connection' ? connection : undefined) } as unknown as Context
     registerMemoryApi(ctx, store, join(root, 'memory-root'), { maxBytes: 4096, homeDir: root }, { maxBytes: 4096 }, identity)
-    return (req: Request) => routes.get(`${BASE}/groups.list`)!(req)
+    return routes
+  }
+  const call = (routes: Map<string, (r: Request) => Promise<Response>>, path: string, init?: RequestInit): Promise<Response> => {
+    const [routePath, query] = path.split('?')
+    const handler = routes.get(`${BASE}/${routePath!}`)
+    if (handler === undefined) throw new Error(`route not registered: ${routePath}`)
+    return handler(new Request(`http://x${BASE}/${routePath!}${query !== undefined ? `?${query}` : ''}`, init))
   }
   const bridgeFor = (login: string | undefined, admin?: boolean): ReturnType<typeof createIdentityBridge> => ({
     active: () => true, isAdmin: () => undefined,
@@ -98,18 +105,58 @@ describe('гейт маршрутов панели', () => {
   })
 
   it('без webAuth (identity не активен) — как раньше', async () => {
-    const call = mount(undefined, new MemoryStore(root))
-    expect((await call(new Request('http://x/'))).status).toBe(200)
+    const routes = mount(undefined, new MemoryStore(root))
+    const response = await call(routes, 'groups.list')
+    expect(response.status).toBe(200)
+    expect((await response.json() as { restricted?: boolean }).restricted).toBe(false)
   })
-  it('не определили личность → 403; не админ → 403; админ → 200', async () => {
+  it('личность не определена → 403 (fail-closed, как в 1.10.0)', async () => {
+    const routes = mount(bridgeFor(undefined), new MemoryStore(root))
+    for (const path of ['groups.list', 'memory.read', 'memory.write', 'memory.delete', 'config.get', 'audit.stats', 'health.report', 'export.agents', 'import.claude.scan']) {
+      const init = path === 'memory.write' || path === 'memory.delete'
+        ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }
+        : undefined
+      expect((await call(routes, path, init)).status).toBe(403)
+    }
+  })
+  it('админ → 200 полный режим; не админ → группы.list 200, но restricted: true', async () => {
     const store = new MemoryStore(root, { admins: ['boss'] })
-    expect((await mount(bridgeFor(undefined), store)(new Request('http://x/'))).status).toBe(403)
-    expect((await mount(bridgeFor('alice'), store)(new Request('http://x/'))).status).toBe(403)
-    expect((await mount(bridgeFor('boss'), store)(new Request('http://x/'))).status).toBe(200)
-    expect((await mount(bridgeFor('Boss'), store)(new Request('http://x/'))).status).toBe(403) // регистр значим
+    const boss = mount(bridgeFor('boss'), store)
+    const adminView = await (await call(boss, 'groups.list')).json() as { restricted?: boolean }
+    expect(adminView.restricted).toBe(false)
+    // регистр значим: Boss — не админ, но панель ему теперь доступна в ограниченном режиме
+    const notAdmin = mount(bridgeFor('Boss'), store)
+    const limited = await call(notAdmin, 'groups.list')
+    expect(limited.status).toBe(200)
+    expect((await limited.json() as { restricted?: boolean }).restricted).toBe(true)
     // роль от хоста авторитетна и в обе стороны
-    expect((await mount(bridgeFor('alice', true), store)(new Request('http://x/'))).status).toBe(200)
-    expect((await mount(bridgeFor('boss', false), store)(new Request('http://x/'))).status).toBe(403)
+    const promoted = mount(bridgeFor('alice', true), store)
+    expect(((await (await call(promoted, 'groups.list')).json()) as { restricted?: boolean }).restricted).toBe(false)
+    const demoted = mount(bridgeFor('boss', false), store)
+    expect(((await (await call(demoted, 'groups.list')).json()) as { restricted?: boolean }).restricted).toBe(true)
+  })
+  it('не админ: запись/настройки/импорт/статистика запрещены (403), удаление своих — работает', async () => {
+    const rootDir = join(root, 'memory-root')
+    const store = new MemoryStore(rootDir, { admins: ['boss'] })
+    await store.withOwner('alice').write({ name: 'mine', description: 'd', type: 'reference', body: 'b' }, 'user')
+    const routes = mount(bridgeFor('alice'), store)
+    for (const [path, init] of [
+      ['memory.write', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: 'user', name: 'x', description: 'd', type: 'reference', body: 'b' }) }],
+      ['config.get', undefined],
+      ['config.set', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }],
+      ['audit.stats', undefined],
+      ['health.report', undefined],
+      ['export.agents', undefined],
+      ['import.claude.scan', undefined],
+    ] as const) {
+      expect((await call(routes, path, init)).status).toBe(403)
+    }
+    const read = await call(routes, 'memory.read?name=mine&scope=user')
+    expect(read.status).toBe(200)
+    expect(((await read.json()) as { body?: string }).body).toBe('b')
+    const del = await call(routes, 'memory.delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: 'user', name: 'mine' }) })
+    expect(del.status).toBe(200)
+    expect(await store.withOwner('alice').read('mine', 'user')).toBeNull()
   })
 })
 

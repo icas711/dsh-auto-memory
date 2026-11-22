@@ -1,6 +1,5 @@
 import z from "@deepseek-ai/schemastery";
 import { Context } from "@deepseek-ai/cordis";
-//#region src/index.d.ts
 declare const name = "dsh-auto-memory";
 declare const inject: string[];
 /** 插件配置(schemastery 声明,默认值写在 schema;用户经 profile patch 覆盖,整表替换)。 */
@@ -67,5 +66,4 @@ interface Config {
 }
 declare const Config: z<Config>;
 declare function apply(ctx: Context, config: Config): void;
-//#endregion
 export { Config, apply, inject, name };
